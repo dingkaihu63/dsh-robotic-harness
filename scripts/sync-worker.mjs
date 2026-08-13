@@ -16,8 +16,8 @@ const copies = [
     to: join(bundle, 'worker', 'robotic_harness_worker'),
   },
   {
-    from: join(root, 'fixtures', 'robot_assets'),
-    to: join(bundle, 'fixtures', 'robot_assets'),
+    from: join(root, 'fixtures'),
+    to: join(bundle, 'fixtures'),
   },
   {
     from: join(root, 'scenarios', 'mujoco_pick_place'),

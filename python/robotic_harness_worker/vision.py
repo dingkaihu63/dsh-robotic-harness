@@ -37,6 +37,23 @@ def _require_cv2():
     return cv2
 
 
+def _cv2_failure(method: str, error: BaseException) -> dict[str, Any]:
+    """Structured failure for a cv2 native crash.
+
+    OpenCV can raise ``cv2.error`` (or die with a native C++ exception) when
+    its runtime conflicts with other native libraries loaded in the same
+    process. Perception must degrade gracefully instead of failing the run:
+    the caller falls back to the next route or to simulated perception, and
+    the reason is recorded.
+    """
+    return {
+        "ok": False,
+        "method": method,
+        "reason": f"cv2 backend failure ({type(error).__name__}: {error}); using fallback perception",
+        "backendFailure": True,
+    }
+
+
 def _to_bgr(image: np.ndarray) -> np.ndarray:
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected an RGB image (H,W,3), got shape {image.shape}")
@@ -60,32 +77,35 @@ def color_segmentation(
     """
     cv2 = _require_cv2()
     started = time.time()
-    bgr = _to_bgr(image)
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)  # type: ignore[attr-defined]
+    try:
+        bgr = _to_bgr(image)
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)  # type: ignore[attr-defined]
 
-    presets = {
-        "red": (0, 10, 60, 255, 40, 255),
-        "blue": (95, 130, 60, 255, 40, 255),
-        "green": (35, 85, 60, 255, 40, 255),
-        "yellow": (15, 35, 60, 255, 40, 255),
-    }
-    if hsv_range is None:
-        if color not in presets:
-            raise ValueError(f"unknown color {color!r}; pass hsvRange or use one of {sorted(presets)}")
-        hsv_range = presets[color]
-    lower = np.array([hsv_range[0], hsv_range[2], hsv_range[4]], dtype=np.uint8)
-    upper = np.array([hsv_range[1], hsv_range[3], hsv_range[5]], dtype=np.uint8)
+        presets = {
+            "red": (0, 10, 60, 255, 40, 255),
+            "blue": (95, 130, 60, 255, 40, 255),
+            "green": (35, 85, 60, 255, 40, 255),
+            "yellow": (15, 35, 60, 255, 40, 255),
+        }
+        if hsv_range is None:
+            if color not in presets:
+                raise ValueError(f"unknown color {color!r}; pass hsvRange or use one of {sorted(presets)}")
+            hsv_range = presets[color]
+        lower = np.array([hsv_range[0], hsv_range[2], hsv_range[4]], dtype=np.uint8)
+        upper = np.array([hsv_range[1], hsv_range[3], hsv_range[5]], dtype=np.uint8)
 
-    mask = cv2.inRange(hsv, lower, upper)  # type: ignore[attr-defined]
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # type: ignore[attr-defined]
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore[attr-defined]
-    best = None
-    best_area = 0.0
-    for contour in contours:
-        area = cv2.contourArea(contour)  # type: ignore[attr-defined]
-        if area > best_area:
-            best_area = float(area)
-            best = contour
+        mask = cv2.inRange(hsv, lower, upper)  # type: ignore[attr-defined]
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # type: ignore[attr-defined]
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore[attr-defined]
+        best = None
+        best_area = 0.0
+        for contour in contours:
+            area = cv2.contourArea(contour)  # type: ignore[attr-defined]
+            if area > best_area:
+                best_area = float(area)
+                best = contour
+    except Exception as error:  # noqa: BLE001 - native cv2 failures must degrade, not crash
+        return _cv2_failure("color_segmentation", error)
 
     if best is None or best_area < min_area:
         return {
@@ -138,18 +158,21 @@ def saliency_segmentation(
     """
     cv2 = _require_cv2()
     started = time.time()
-    gray = cv2.cvtColor(_to_bgr(image), cv2.COLOR_BGR2GRAY)  # type: ignore[attr-defined]
-    edges = cv2.Canny(gray, 50, 150)  # type: ignore[attr-defined]
-    kernel = np.ones((5, 5), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=2)  # type: ignore[attr-defined]
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore[attr-defined]
-    best = None
-    best_area = 0.0
-    for contour in contours:
-        area = cv2.contourArea(contour)  # type: ignore[attr-defined]
-        if area > best_area:
-            best_area = float(area)
-            best = contour
+    try:
+        gray = cv2.cvtColor(_to_bgr(image), cv2.COLOR_BGR2GRAY)  # type: ignore[attr-defined]
+        edges = cv2.Canny(gray, 50, 150)  # type: ignore[attr-defined]
+        kernel = np.ones((5, 5), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=2)  # type: ignore[attr-defined]
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore[attr-defined]
+        best = None
+        best_area = 0.0
+        for contour in contours:
+            area = cv2.contourArea(contour)  # type: ignore[attr-defined]
+            if area > best_area:
+                best_area = float(area)
+                best = contour
+    except Exception as error:  # noqa: BLE001 - native cv2 failures must degrade, not crash
+        return _cv2_failure("saliency_segmentation", error)
 
     if best is None or best_area < min_area:
         return {"ok": False, "method": "saliency_segmentation", "reason": "no salient blob found"}

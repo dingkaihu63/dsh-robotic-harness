@@ -13,6 +13,7 @@ Protocol::
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -20,11 +21,7 @@ import traceback
 from typing import Any, Callable
 
 from . import __version__, WORKER_CAPABILITIES
-from .core import RunStore, new_id, snapshot_environment
-
-
-class WorkerError(Exception):
-    """A domain error that should be reported as a structured result."""
+from .core import RunStore, WorkerError, new_id, snapshot_environment
 
 
 def _read_args(parser_args: argparse.Namespace) -> dict[str, Any]:
@@ -71,7 +68,13 @@ def cmd_ping(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def cmd_capability_list(args: dict[str, Any]) -> dict[str, Any]:
-    return {"ok": True, "capabilities": WORKER_CAPABILITIES}
+    capabilities = list(WORKER_CAPABILITIES)
+    for module_name in _DOMAIN_MODULES:
+        module = _import_domain_module(module_name)
+        if module is not None:
+            for capability in getattr(module, "CAPABILITIES", []):
+                capabilities.append(capability)
+    return {"ok": True, "capabilities": capabilities}
 
 
 def cmd_inspect_asset(args: dict[str, Any]) -> dict[str, Any]:
@@ -303,8 +306,126 @@ def cmd_demo(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# extended simulation / report commands
+# ---------------------------------------------------------------------------
+
+def cmd_sim_fault_inject(args: dict[str, Any]) -> dict[str, Any]:
+    """Dedicated fault-injection wrapper over sim-run (same engine)."""
+    from .simulation import load_scenario, run_pick_place
+
+    scenario_config = args.get("scenario", {})
+    if isinstance(scenario_config, str):
+        scenario_config = load_scenario(scenario_config)
+    store = _store_for(args)
+    run, _ = run_pick_place(
+        scenario_config,
+        args.get("fault", {}),
+        int(args.get("seed", 42)),
+        store=store,
+        run_id=args.get("runId") or new_id("run"),
+    )
+    return {
+        "ok": True,
+        "runId": run.id,
+        "injectedFault": args.get("fault", {}),
+        "success": bool(run.metrics.get("success")),
+        "metrics": run.metrics,
+        "anomalies": [a.to_dict() for a in run.anomalies],
+        "runDir": store.run_dir(run.id),
+    }
+
+
+def cmd_sdf_validate(args: dict[str, Any]) -> dict[str, Any]:
+    from .assets import validate_sdf
+
+    path = args.get("path")
+    if not path:
+        raise WorkerError("missing required argument 'path'")
+    if not os.path.exists(path):
+        raise WorkerError(f"SDF not found: {path}")
+    return validate_sdf(path)
+
+
+def cmd_sim_replay(args: dict[str, Any]) -> dict[str, Any]:
+    from .report import replay_run
+
+    run_path = args.get("runPath") or args.get("runDir")
+    out_dir = args.get("outDir")
+    if not run_path or not out_dir:
+        raise WorkerError("missing required arguments 'runPath' and 'outDir'")
+    return replay_run(run_path, out_dir)
+
+
+def cmd_sim_real_gap_report(args: dict[str, Any]) -> dict[str, Any]:
+    from .simulation import sim_real_gap
+
+    sim_run = args.get("simRunPath") or args.get("runPath")
+    real_csv = args.get("realCsvPath")
+    channel_map = args.get("channelMap")
+    if not sim_run or not real_csv or not channel_map:
+        raise WorkerError("missing required arguments 'simRunPath', 'realCsvPath' and 'channelMap'")
+    return sim_real_gap(sim_run, real_csv, channel_map)
+
+
+def cmd_sim_batch_benchmark(args: dict[str, Any]) -> dict[str, Any]:
+    from .simulation import sim_batch_benchmark
+
+    cells = args.get("cells") or args.get("matrix")
+    if not cells:
+        raise WorkerError("missing required argument 'cells' (list of {label?, fault?, seed?})")
+    store = _store_for(args)
+    return sim_batch_benchmark(cells, store=store, out_dir=args.get("outDir"))
+
+
+def cmd_dashboard_generate(args: dict[str, Any]) -> dict[str, Any]:
+    from .report import dashboard_html
+
+    store = _store_for(args)
+    out_path = args.get("outPath")
+    if not out_path:
+        raise WorkerError("missing required argument 'outPath'")
+    path = dashboard_html(store.root, out_path)
+    return {"ok": True, "path": path, "storeRoot": store.root}
+
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
+
+# Domain modules whose COMMANDS are auto-registered. Each module exports
+# ``COMMANDS: dict[str, Callable[[dict], dict]]`` per the worker module
+# contract (docs/worker-module-contract.md).
+_DOMAIN_MODULES = [
+    "control",
+    "ros",
+    "telemetry",
+    "data_pipeline",
+    "models",
+    "vision_extra",
+    "experiment",
+    "cad",
+    "knowledge",
+    "robots",
+]
+
+
+def _import_domain_module(module_name: str):
+    try:
+        return importlib.import_module(f".{module_name}", __package__)
+    except ImportError:
+        return None
+
+
+def _register_domain_commands(commands: dict[str, Callable[[dict[str, Any]], dict[str, Any]]]) -> None:
+    for module_name in _DOMAIN_MODULES:
+        module = _import_domain_module(module_name)
+        if module is None:
+            continue
+        for name, fn in getattr(module, "COMMANDS", {}).items():
+            if name in commands:
+                raise RuntimeError(f"duplicate command {name!r} from module {module_name}")
+            commands[name] = fn
+
 
 COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "ping": cmd_ping,
@@ -315,12 +436,20 @@ COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "sim-status": cmd_sim_status,
     "sim-validate-scenario": cmd_sim_validate_scenario,
     "sim-run": cmd_sim_run,
+    "sim-fault-inject": cmd_sim_fault_inject,
+    "sdf-validate": cmd_sdf_validate,
+    "sim-replay": cmd_sim_replay,
+    "sim-real-gap-report": cmd_sim_real_gap_report,
+    "sim-batch-benchmark": cmd_sim_batch_benchmark,
     "diagnose-run": cmd_diagnose_run,
     "evidence-export": cmd_evidence_export,
     "report-generate": cmd_report_generate,
+    "dashboard-generate": cmd_dashboard_generate,
     "data-quality": cmd_data_quality,
     "demo": cmd_demo,
 }
+
+_register_domain_commands(COMMANDS)
 
 
 def build_parser() -> argparse.ArgumentParser:

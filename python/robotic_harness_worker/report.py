@@ -14,7 +14,7 @@ import os
 import time
 from typing import Any
 
-from .core import DiagnosticCase, Run, sha256_file, snapshot_environment
+from .core import DiagnosticCase, Run, RunStore, sha256_file, snapshot_environment
 from .diagnostics import load_run_data
 
 
@@ -174,6 +174,149 @@ def generate_report(
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
     return out_path
+
+
+def replay_run(run_path: str, out_dir: str, include_report: bool = True) -> dict[str, Any]:
+    """Replay a stored run into a self-contained replay package.
+
+    Read-only by design: replay never re-executes simulation or tools. It
+    copies the run record, telemetry, artifacts and diagnostics into
+    ``out_dir`` and regenerates the timeline (and optionally the Markdown
+    report) so the run can be inspected without the original workspace.
+    """
+    from .diagnostics import diagnose, load_run_data
+
+    run, telemetry = load_run_data(run_path)
+    run_dir = os.path.dirname(os.path.abspath(run_path)) if os.path.isfile(run_path) else os.path.abspath(run_path)
+    os.makedirs(out_dir, exist_ok=True)
+    copied: list[str] = []
+
+    import shutil
+
+    for name in ("run.json", "telemetry.jsonl"):
+        source = os.path.join(run_dir, name)
+        if os.path.exists(source):
+            shutil.copy2(source, os.path.join(out_dir, name))
+            copied.append(name)
+    artifact_dir = os.path.join(run_dir, "artifacts")
+    if os.path.isdir(artifact_dir):
+        target_dir = os.path.join(out_dir, "artifacts")
+        os.makedirs(target_dir, exist_ok=True)
+        for entry in sorted(os.listdir(artifact_dir)):
+            shutil.copy2(os.path.join(artifact_dir, entry), os.path.join(target_dir, entry))
+            copied.append(f"artifacts/{entry}")
+
+    case = diagnose(run, telemetry)
+    timeline_path = timeline_html(run, telemetry, case, os.path.join(out_dir, "timeline.html"))
+    copied.append(os.path.basename(timeline_path))
+    report_path = None
+    if include_report:
+        report_path = generate_report(run_path, case, os.path.join(out_dir, "report.md"), evidence_dir=out_dir)
+        copied.append(os.path.basename(report_path))
+
+    return {
+        "ok": True,
+        "runId": run.id,
+        "outDir": os.path.abspath(out_dir),
+        "copied": copied,
+        "timeline": timeline_path,
+        "report": report_path,
+        "note": "replay is read-only: no simulation or tools were re-executed",
+    }
+
+
+def dashboard_html(store_root: str, out_path: str) -> str:
+    """Generate a single-file dashboard over the run store.
+
+    Tabs: overview (run list), runs (metrics table), diagnostics (open
+    cases), artifacts. Everything is embedded — no server or network needed.
+    """
+    store = RunStore(store_root)
+    runs = store.list_runs()
+    cases: list[dict[str, Any]] = []
+    cases_dir = os.path.join(store_root, "cases")
+    if os.path.isdir(cases_dir):
+        for entry in sorted(os.listdir(cases_dir)):
+            if entry.endswith(".json"):
+                with open(os.path.join(cases_dir, entry), encoding="utf-8") as handle:
+                    try:
+                        cases.append(json.load(handle))
+                    except json.JSONDecodeError:
+                        continue
+
+    payload = {"storeRoot": store_root, "runs": runs, "cases": cases}
+    embedded = html.escape(json.dumps(payload, ensure_ascii=False), quote=True)
+    page = _DASHBOARD_TEMPLATE.replace("__PAYLOAD__", embedded)
+    with open(out_path, "w", encoding="utf-8") as handle:
+        handle.write(page)
+    return out_path
+
+
+_DASHBOARD_TEMPLATE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Robotic Harness — dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; background: #fafafa; color: #1a1a1a; }
+  h1 { font-size: 20px; } h2 { font-size: 15px; margin-top: 24px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border: 1px solid #ddd; padding: 4px 8px; text-align: left; }
+  th { background: #eef; }
+  .ok { color: #146c43; font-weight: 600; } .bad { color: #b02a37; font-weight: 600; }
+  .tab { display: inline-block; padding: 6px 16px; margin-right: 4px; background: #e9ecef;
+         border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; }
+  .tab.active { background: #0d6efd; color: #fff; }
+  .panel { display: none; border: 1px solid #dee2e6; padding: 12px; }
+  .panel.active { display: block; }
+  .metric { display: inline-block; background: #fff; border: 1px solid #ddd; border-radius: 8px;
+            padding: 8px 14px; margin: 4px 8px 4px 0; }
+  .metric b { display: block; font-size: 18px; }
+  .metric span { font-size: 11px; color: #666; }
+</style>
+</head>
+<body>
+<h1>Robotic Harness — dashboard</h1>
+<div>
+  <span class="tab active" onclick="show('overview')">Overview</span>
+  <span class="tab" onclick="show('runs')">Runs</span>
+  <span class="tab" onclick="show('cases')">Diagnostics</span>
+</div>
+<div id="overview" class="panel active"></div>
+<div id="runs" class="panel"></div>
+<div id="cases" class="panel"></div>
+<script>
+const payload = JSON.parse(decodeURIComponent("__PAYLOAD__"));
+const runs = payload.runs || [], cases = payload.cases || [];
+function show(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === ['overview','runs','cases'].indexOf(name)));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === name));
+}
+const total = runs.length, success = runs.filter(r => r.success).length;
+const failed = total - success;
+document.getElementById('overview').innerHTML =
+  `<div class="metric"><span>runs</span><b>${total}</b></div>` +
+  `<div class="metric"><span>success</span><b class="ok">${success}</b></div>` +
+  `<div class="metric"><span>failed</span><b class="bad">${failed}</b></div>` +
+  `<div class="metric"><span>open cases</span><b>${cases.filter(c => c.status === 'open').length}</b></div>` +
+  `<h2>Recent runs</h2>` + runsTable(runs.slice(0, 10));
+function runsTable(list) {
+  if (!list.length) return '<p>no runs yet</p>';
+  return '<table><tr><th>run</th><th>scenario</th><th>state</th><th>success</th><th>created</th><th>dir</th></tr>' +
+    list.map(r => `<tr><td>${r.id}</td><td>${r.scenario}</td><td>${r.state}</td>` +
+      `<td class="${r.success ? 'ok' : 'bad'}">${r.success}</td><td>${new Date(r.createdAt * 1000).toLocaleString()}</td>` +
+      `<td><code>${r.runDir}</code></td></tr>`).join('') + '</table>';
+}
+document.getElementById('runs').innerHTML = runsTable(runs);
+document.getElementById('cases').innerHTML = cases.length
+  ? '<table><tr><th>case</th><th>run</th><th>symptom</th><th>status</th><th>hypotheses</th></tr>' +
+    cases.map(c => `<tr><td>${c.id}</td><td>${c.runId}</td><td>${c.symptom}</td>` +
+      `<td>${c.status}</td><td>${(c.hypotheses || []).length}</td></tr>`).join('') + '</table>'
+  : '<p>no diagnostic cases yet</p>';
+</script>
+</body>
+</html>
+"""
 
 
 def timeline_html(run: Run, telemetry: list[dict[str, Any]], case: DiagnosticCase | None, out_path: str) -> str:

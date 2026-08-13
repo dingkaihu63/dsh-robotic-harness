@@ -22,6 +22,31 @@ KIND_ORIGIN = {"fact", "rule", "inference", "manual"}
 RUN_STATES = {"draft", "running", "completed", "failed", "aborted"}
 
 
+class WorkerError(Exception):
+    """A domain error that should be reported as a structured result.
+
+    Raised by worker commands for expected failures (bad input, missing
+    backend, unsupported format); the CLI layer converts it to
+    ``{"ok": false, "error": {"kind": "worker", "message": ...}}`` with exit
+    code 0 so callers can distinguish it from invocation errors.
+    """
+
+
+def normalize_store_root(store_root: str) -> str:
+    """Normalize a storeRoot argument to the RunStore root directory.
+
+    The CLI passes the RunStore root (``<workspace>/.rh``) as ``storeRoot``;
+    older callers may pass the workspace root itself. Both forms are
+    accepted and collapsed onto the ``.rh`` directory.
+    """
+    root = (store_root or "").strip()
+    if not root:
+        return os.path.join(os.getcwd(), ".rh")
+    if os.path.basename(os.path.normpath(root)) == ".rh":
+        return os.path.normpath(root)
+    return os.path.join(os.path.normpath(root), ".rh")
+
+
 def _slug(value: str) -> str:
     """Normalize a string into a safe file-name fragment."""
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-")

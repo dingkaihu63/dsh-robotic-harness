@@ -45,3 +45,18 @@ for (const run of payload.runs ?? []) {
   console.log(`  timeline  : ${run.timeline}`)
   console.log(`  evidence  : ${run.evidenceBundle}`)
 }
+
+// Generate the single-file dashboard over the run store.
+const dashboard = spawnSync(
+  python,
+  ['-m', 'robotic_harness_worker', 'dashboard-generate', '--input', '-'],
+  {
+    input: JSON.stringify({ storeRoot: join(outDir, '.rh'), outPath: join(outDir, 'dashboard.html') }),
+    encoding: 'utf8',
+    env,
+  },
+)
+if (dashboard.status === 0) {
+  const parsed = JSON.parse(dashboard.stdout)
+  console.log(`\ndashboard : ${parsed.path}`)
+}

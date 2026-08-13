@@ -11,23 +11,25 @@
 
 | 模块 | 本仓库状态 |
 |---|---|
-| 机器人资产检查（URDF/MJCF：link/joint/惯量/碰撞） | ✅ v0.1 Demo |
-| URDF 校验 与 URDF→MJCF 转换 | ✅ v0.1 Demo |
-| MuJoCo 抓取仿真 + 故障注入 | ✅ v0.1 Demo |
-| 感知路由（颜色分割 → 通用分割） | ✅ v0.1 Demo（最小实现） |
-| 确定性诊断（事实 / 规则 / 假设） | ✅ v0.1 Demo |
-| 数据质量审计（CSV/JSONL 时序） | ✅ v0.1 Demo（子集） |
-| 证据包、Markdown 报告、独立 timeline.html | ✅ v0.1 Demo |
-| ROS 2 只读诊断（graph/TF/QoS/rosbag） | ⏳ 路线图中——仅有 Skill 模板（`rh-ros2-health-check`） |
-| CAD / SolidWorks / FreeCAD | ⏳ 路线图中 |
-| 相机标定、检测、分割、6D 位姿 | ⏳ 路线图中 |
-| 控制分析（PID/轨迹对比、系统辨识） | ⏳ 路线图中 |
-| VLA / VLM 模型适配 | ⏳ 路线图中 |
-| 实时遥测 Web 面板 | ⏳ 路线图中（目前用单文件 timeline.html 代替） |
-| 人体示教数据与隐私流程 | ⏳ 路线图中（需要合规数据） |
-| 真机实验 | ❌ v0.1 不在范围内——见 [docs/safety-boundary.md](docs/safety-boundary.md) |
+| 机器人资产检查（URDF/MJCF/SDF：link/joint/惯量/碰撞） | ✅ 已实现 |
+| CAD：清单/版本对比/网格检查/惯量与拓扑校验/SVG 预览/URDF→MJCF 与 SDF 兼容导出/资产报告 | ✅ 已实现（SolidWorks 文件只登记不解析） |
+| URDF 校验 与 URDF→MJCF 转换 | ✅ 已实现 |
+| MuJoCo 抓取仿真 + 故障注入 + 批量基准 + 只读回放 + 仿真-真机差距报告 | ✅ 已实现 |
+| 感知路由 + 相机健康/标定检查 + 位姿校验 + 感知对比 | ✅ 已实现 |
+| 确定性诊断 + 遥测通道/时间窗/异常扫描/证据收集/Run 对比 | ✅ 已实现 |
+| 数据处理：清单/schema/时间同步/对齐/转换/episode/标注/防泄漏切分/去标识化/rosbag 转换/LeRobot 导出/数据集版本与数据卡 | ✅ 已实现（RLDS=manifest；parquet 可选） |
+| 实验管理：spec/矩阵/基准/指标/消融/报告 | ✅ 已实现 |
+| 控制分析：跟踪指标/轨迹校验/计划-实际对比/PID 模板与配置对比/系统辨识 | ✅ 已实现 |
+| 具身模型注册表：内置演示模型真实可跑；外部/重型模型诚实探测 | ✅ 已实现（适配器模式） |
+| 知识检索：文档索引/手册检索/错误码/案例检索 | ✅ 已实现 |
+| 真机实验状态机 + preflight | ✅ 已实现（状态机）；无适配器时真机项标记 skip，绝不假装通过 |
+| ROS 2 只读诊断（graph/TF/QoS/控制器） | 🔌 适配器已实现；实机探测需 `ros2` CLI；**rosbag2 检查无需 ROS** |
+| 单文件仪表盘与时间线查看器 | ✅ 已实现（静态快照，非实时） |
+| DSH Web 客户端插件面板 | ⏳ 路线图（当前用静态 HTML 查看器代替） |
+| 人体示教数据与隐私流程 | ✅ 已实现（去标识化工具集）；需要合规数据 |
+| SolidWorks API / FreeCAD 深度集成、Isaac、真机适配器 | ⏳ 路线图 |
 
-**结论**：产品方案是一张完整产品地图，本仓库**并未也不可能一次实现全部模块**——按方案的“Demo 先行、渐进式范围”原则，当前交付的是 v0.1 Demo 切片；[路线图](docs/roadmap.md) 列出后续阶段，每个未实现模块都是社区贡献入口。
+**结论**：方案中的工具/Skill 面已按"Demo 级适配器"全部实现——纯软件模块完整且有测试；硬件/后端依赖模块（ROS 2 实机、SolidWorks、真机、重型 VLA）以诚实适配器形式存在，后端缺失时返回结构化 `backend:"unavailable"` 诊断并附安装指引，绝不假装可用。完整 100 工具清单见 [docs/tool-inventory.md](docs/tool-inventory.md)，[路线图](docs/roadmap.md) 列出仍需真实硬件/后端验证的部分。
 
 ## 30 秒架构
 
@@ -35,16 +37,22 @@
 DSH profile（rh-demo）
   └─ @robotic-harness/dsh-bundle（本仓库）
        ├─ rh-core    项目/Run 存储根解析（.rh/ 布局，全部在 workspace 内）
-       ├─ rh-tools   12 个机器人领域工具（资产检查/仿真/诊断/数据质量）
-       └─ rh-skills  6 个 SKILL.md（inspect-asset / pick-place-demo / diagnose / benchmark / evidence / data-quality）
+       ├─ rh-tools   ~100 个机器人领域工具（10 大域，见 docs/tool-inventory.md）
+       └─ rh-skills  25 个 SKILL.md（资产/CAD/ROS/控制/视觉/模型/仿真/实机/数据/实验/知识）
               │  stdio JSON（一次性进程）
               ▼
        robotic_harness_worker（Python 3.10，随包分发）
-        ├─ assets       URDF/MJCF 检查、惯量校验、URDF→MJCF 转换
-        ├─ simulation   MuJoCo 平面 3 自由度吸盘抓取场景 + 故障注入
-        ├─ vision       颜色分割 → 通用分割（规则路由）
-        ├─ diagnostics  确定性规则引擎（事实 / 规则 / 推断分层）
-        └─ data         CSV/JSONL 时序质量审计
+        ├─ assets/cad   URDF/MJCF/SDF 检查、惯量、拓扑、网格、SVG 预览、转换
+        ├─ simulation   MuJoCo 抓取、故障注入、批量基准、只读回放、仿真-真机差距
+        ├─ vision       颜色/通用分割、相机健康、标定、位姿校验
+        ├─ control      跟踪指标、轨迹校验、系统辨识、PID 模板
+        ├─ models       具身模型注册表 + 内置演示适配器 + 诚实后端探测
+        ├─ diagnostics  规则引擎（事实/规则/假设）+ 遥测异常扫描
+        ├─ robots       真机实验状态机 + preflight
+        ├─ data         清单/同步/转换/切分/去标识化/rosbag/LeRobot/数据集版本
+        ├─ experiment   spec/矩阵/基准/指标/消融
+        ├─ ros          ros2 实机探测（适配器）+ 免 ROS 的 rosbag2 检查
+        └─ knowledge    文档索引/检索、错误码、案例检索
 ```
 
 ## 一键 Demo（无需 DSH，纯 Python）
@@ -53,15 +61,17 @@ DSH profile（rh-demo）
 （推荐 Anaconda 的 `python3.10` 环境；本仓库的所有产物与缓存均落在仓库目录内，不写 C 盘。）
 
 ```sh
-# 1) 单元测试
-cd python && python -m pytest tests -q
+# 1) 单元测试（每个测试文件独立进程运行，规避 mujoco/cv2/pyarrow 原生 DLL 冲突
+#    ——与 worker 一次性进程的生产形态一致）
+cd python && python run_tests.py
 
-# 2) 端到端 Demo：正常 Run + 故障 Run + 诊断 + 证据包 + Markdown 报告 + 时间线 HTML
+# 2) 端到端 Demo：正常 Run + 故障 Run + 诊断 + 证据包 + Markdown 报告 + 时间线 + 仪表盘
 PYTHON=<你的 python3.10> node scripts/demo.mjs
 # 输出在 examples/demo-output/ ：
 #   report-run-*.md           实验报告（含证据与假设）
 #   timeline-run-*.html       独立时间线查看器（浏览器直接打开，无需服务器）
 #   bundle-run-*/             自包含证据包（manifest + 哈希 + 遥测 + 图表）
+#   dashboard.html            单文件仪表盘
 ```
 
 ## 安装为 DSH 插件（bundle）
@@ -90,28 +100,28 @@ dsh plugin --profile rh-demo add ./packages/dsh-bundle
 dsh --profile rh-demo --port 3080
 ```
 
-安装后，Agent 拥有 12 个 `rh_*` 工具与 6 个 Skill。例如对 Agent 说：
+安装后，Agent 拥有 **约 100 个 `rh_*` 工具与 25 个 Skill**，覆盖十大领域：资产/CAD、ROS 2（适配器）、控制、视觉与标定、具身模型、仿真、真机实验、遥测与诊断、数据处理、实验管理、知识检索。完整工具表（工具 → worker 命令 → 风险分级）见 [docs/tool-inventory.md](docs/tool-inventory.md)。
+
+例如对 Agent 说：
 
 > “运行 Robotic Harness 的 pick-place demo：检查 demo 机械臂，跑一次正常仿真和一次带故障的仿真，诊断失败原因，导出证据包并生成报告。”
 
-工具会调用 Python worker（`python -m robotic_harness_worker <command> --input -`），所有 Run、遥测、图表、报告默认写入 workspace 的 `.rh/` 目录。
+工具会调用 Python worker（`python -m robotic_harness_worker <command> --input -`），所有 Run、遥测、图表、报告默认写入 workspace 的 `.rh/` 目录。分域速览：
 
-### 可用工具一览
-
-| 工具 | 风险 | 说明 |
-|---|---|---|
-| `rh_worker_ping` | R0 | worker 健康与依赖版本 |
-| `rh_capability_list` | R0 | 能力清单（资产/仿真/感知/策略/诊断/数据） |
-| `rh_robot_asset_inspect` | R0 | URDF/MJCF 结构检查（link/joint/惯量/碰撞 + 问题分级） |
-| `rh_urdf_validate` | R0 | URDF 校验（树结构、惯量正定、限位、轴、mesh 路径） |
-| `rh_urdf_to_mjcf` | R1 | URDF→MJCF 受控转换（MuJoCo 编译器 + 差异报告） |
-| `rh_sim_status` | R0 | MuJoCo/渲染器/场景可用性 |
-| `rh_sim_validate_scenario` | R0 | 场景可达性/参数校验 |
-| `rh_sim_run` | R2 | MuJoCo 抓取仿真（含故障注入：感知偏移/夹爪滑落/TF 偏移/传感器噪声/遮挡/超时） |
-| `rh_diagnose_run` | R0 | 确定性诊断：事实/规则/候选根因（证据 + 反证 + 缺失证据 + 建议检查） |
-| `rh_evidence_export` | R1 | 自包含证据包（manifest + sha256 + 遥测 + 图表） |
-| `rh_report_generate` | R1 | Markdown 报告 + 独立 timeline.html |
-| `rh_data_quality` | R0 | CSV/JSONL 时序质量审计（缺失/NaN/乱序/重复/间隙/恒值通道） |
+| 领域 | 代表工具 |
+|---|---|
+| 资产/CAD | `rh_robot_asset_inspect`、`rh_urdf_validate`、`rh_urdf_to_mjcf`、`rh_sdf_validate`、`rh_cad_inventory`、`rh_mesh_inspect`、`rh_inertia_validate`、`rh_robot_topology_validate`、`rh_urdf_preview`、`rh_export_sim_asset`、`rh_generate_asset_report` |
+| ROS 2 | `rh_ros_graph_snapshot`、`rh_ros_topic_profile`、`rh_ros_qos_check`、`rh_ros_tf_audit`、`rh_rosbag_inspect`（免 ROS）、`rh_rosbag_start/stop`、`rh_ros_call_whitelisted_action` |
+| 控制 | `rh_control_trace_analyze`、`rh_trajectory_validate`、`rh_planned_actual_compare`、`rh_pid_experiment_prepare`、`rh_controller_config_compare`、`rh_system_identification_job` |
+| 视觉 | `rh_camera_health_check`、`rh_calibration_inspect`、`rh_perception_run`、`rh_perception_compare`、`rh_pose_transform_validate`、`rh_annotate_failure_frame` |
+| 模型 | `rh_model_inventory`、`rh_model_health`、`rh_model_infer_job`、`rh_model_benchmark`、`rh_capability_route_explain`、`rh_policy_rollout_compare` |
+| 仿真 | `rh_sim_run`、`rh_sim_fault_inject`、`rh_sim_batch_benchmark`、`rh_sim_replay`、`rh_sim_real_gap_report`、`rh_sim_validate_scenario` |
+| 实机 | `rh_robot_preflight`、`rh_experiment_prepare/request_approval/start/pause/safe_cancel/status/finalize` |
+| 遥测 | `rh_telemetry_channels`、`rh_telemetry_window`、`rh_anomaly_scan`、`rh_failure_evidence_collect`、`rh_run_compare`、`rh_diagnose_run`、`rh_timeline_export` |
+| 数据 | `rh_data_inventory`、`rh_data_time_sync_estimate`、`rh_data_align_streams`、`rh_data_transform_apply`、`rh_data_split_create`、`rh_data_leakage_check`、`rh_data_deidentify`、`rh_data_convert_rosbag`、`rh_data_export_lerobot`、`rh_dataset_version_create`、`rh_dataset_card_generate` |
+| 实验 | `rh_experiment_spec_create`、`rh_experiment_matrix_expand`、`rh_benchmark_start`、`rh_metrics_compute`、`rh_ablation_compare`、`rh_benchmark_report` |
+| 知识 | `rh_docs_index`、`rh_manual_search`、`rh_error_code_lookup`、`rh_case_search` |
+| 报告 | `rh_evidence_export`、`rh_report_generate`、`rh_dashboard_generate` |
 
 ## 演示内容（v0.1）
 
@@ -125,19 +135,21 @@ dsh --profile rh-demo --port 3080
 ### 已知限制（如实说明）
 
 - 吸盘抓取为**运动学实现**（吸附后物体位姿跟随吸盘），已在 run 配置与报告中注明。
-- 感知在渲染器可用时使用真实离屏渲染；不可用时退化为“真值+噪声”的模拟感知（记录在遥测中）。
-- 仿真结果不是真机证据；不提供任意 Topic 发布、真机写操作或急停解除能力。
-- ROS 2 / SolidWorks / Isaac / 真机适配尚未实现（见 docs/roadmap.md）。
+- 感知在渲染器可用时使用真实离屏渲染；不可用时退化为“真值+噪声”的模拟感知（记录在遥测中）。若 OpenCV 原生崩溃（如极端环境下的 DLL 冲突），感知同样降级到该回退路径，而不是让 Run 失败。
+- ROS 2 实机工具需要 `ros2` CLI；缺失时返回结构化 `backend:"unavailable"` 诊断。rosbag2 的检查与转换无需 ROS。
+- 真机工具是状态机 + preflight：无硬件适配器时真机项如实标记 `skip`（绝不假装通过）。仿真结果不是真机证据；不提供任意 Topic 发布、真机写操作或急停解除能力。
+- SolidWorks 文件只登记不解析（商业软件）；FreeCAD 深度集成可选。
+- RLDS 导出为 manifest 骨架（完整 TFDS 导出需 tensorflow）；LeRobot 导出在 pyarrow 可用时用 parquet，否则降级 CSV。
 
 ## 目录结构
 
 ```text
 packages/dsh-bundle/   可安装 DSH bundle（TS 插件、skills/、worker 副本、fixtures、scenarios）
-python/                robotic_harness_worker Python 包 + pytest 测试
-fixtures/              URDF 测试资产（正常 + 故意损坏）
+python/                robotic_harness_worker Python 包 + 测试（run_tests.py）
+fixtures/              URDF/SDF 测试资产 + 演示 rosbag2（无需 ROS）
 scenarios/             MuJoCo 场景定义（JSON）
 scripts/               sync-worker / demo / smoke-worker
-docs/                  架构、安全边界、路线图、Demo 说明
+docs/                  架构、安全边界、路线图、Demo 说明、工具清单、worker 契约
 examples/demo-output/  一键 Demo 的输出示例
 ```
 

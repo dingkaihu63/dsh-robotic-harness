@@ -52,14 +52,15 @@ pnpm --filter @robotic-harness/dsh-bundle build
 ## Testing
 
 ```sh
-# Python worker tests (from python/)
-python -m pytest tests -q
+# Python worker tests (per-file process isolation avoids native DLL
+# collisions between mujoco/cv2/pyarrow; matches the one-shot worker)
+cd python && python run_tests.py
 
 # TypeScript build + typecheck
 pnpm --filter @robotic-harness/dsh-bundle build
 pnpm --filter @robotic-harness/dsh-bundle typecheck
 
-# One-command demo (happy + fault + diagnostics + evidence + report)
+# One-command demo (happy + fault + diagnostics + evidence + report + dashboard)
 PYTHON=<your-python3.10> node scripts/demo.mjs
 
 # Bundle -> worker smoke test

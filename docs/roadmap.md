@@ -1,65 +1,50 @@
 # Robotic Harness 路线图
 
-> 依据产品方案（robotic-harness-dsh-plugin-suite-plan.md）的阶段性安排，与当前 Demo 状态对照。
+> 依据产品方案（robotic-harness-dsh-plugin-suite-plan.md）的阶段性安排，与当前实现状态对照。
 
 ## 状态图例
 
-- ✅ 已完成（本仓库 v0.1 Demo）
-- 🔜 下一阶段
-- ⏳ 规划中（等待社区/合作）
+- ✅ 已完成（本仓库已实现并有测试）
+- 🔌 适配器已实现（后端缺失时诚实返回 `backend:"unavailable"`）
+- ⏳ 规划中（等待社区/合作/真实硬件）
 - ❌ 明确不做（第一版）
 
-## 已交付（v0.1 Demo）
+## 已交付（全量工具面）
 
 - ✅ DSH bundle + profile 安装流程（`dsh plugin --profile rh-demo add ./packages/dsh-bundle`）
-- ✅ 12 个 `rh_*` 工具 + 6 个 Skill
-- ✅ Python worker（资产检查 / URDF→MJCF / MuJoCo 抓取 / 故障注入 / 遥测 / 诊断 / 证据包 / 报告 / 时间线 / 数据质量审计）
-- ✅ 领域模型（Run / DiagnosticCase / Capability / Artifact）
-- ✅ 一键 Demo（`node scripts/demo.mjs`）+ 全部测试（20 个 pytest + TS 构建 + bundle 安装启动验证）
+- ✅ ~100 个 `rh_*` 工具 + 25 个 Skill（十大领域，见 docs/tool-inventory.md）
+- ✅ 资产/CAD：URDF/MJCF/SDF 检查、惯量、拓扑、网格、SVG 预览、URDF→MJCF、SDF 兼容导出、资产报告
+- ✅ 仿真：MuJoCo 抓取、故障注入、批量基准、只读回放、sim-real gap 报告
+- ✅ 控制：跟踪指标、轨迹校验、计划-实际对比、PID 模板与配置对比、系统辨识、报告
+- ✅ 视觉：相机健康、标定检查、位姿校验、感知执行/对比、图像集画像、失败帧标注
+- ✅ 模型：注册表 + 内置演示适配器 + 后端探测 + 规则路由 + 策略对比
+- ✅ 遥测诊断：通道/时间窗/异常扫描/失败证据收集/Run 对比/时间线
+- ✅ 数据处理：清单/schema/时间同步/对齐/非破坏转换/episode/标注/防泄漏切分/去标识化/rosbag 转换/LeRobot 导出/数据集版本与数据卡
+- ✅ 实验管理：spec/矩阵/基准/指标/消融/报告
+- ✅ 知识检索：文档索引/手册检索/错误码/案例检索
+- ✅ 真机实验状态机 + preflight（真机项无适配器时如实 skip）
+- ✅ 单文件仪表盘/时间线查看器；一键 Demo（`node scripts/demo.mjs`）
+- ✅ 全部测试（274 个用例，`python run_tests.py` 逐文件隔离）+ TS 构建 + bundle 安装启动验证
 
-## Phase 1 — 数据模块最小闭环（🔜 下一阶段）
+## 下一阶段：真实后端验证（🔌 → ✅ 需要环境）
 
-- rosbag/CSV/Parquet 元数据 inventory 与时间对齐；
-- episode 切分、leakage-safe split、数据卡；
-- LeRobotDataset 或 RLDS 导出（二选一）。
+- **ROS 2 实机**：在装有 ROS 2 的机器上验证 graph/TF/QoS/diagnostics/controller 探测；开放 rosbag 录制与白名单 Action。
+- **SolidWorks / FreeCAD**：验证 STEP 解析增强与装配遍历（FreeCAD 后端）。
+- **真机适配器**：接入具体硬件后验证 preflight 检查项与受控执行流程（遵循 docs/safety-boundary.md）。
+- **重型模型**：验证 PyTorch/端点上模型的 health/warmup/infer/benchmark 适配。
+- **Isaac Lab / Gazebo**：SDF 校验对接与第二仿真后端。
 
-## Phase 2 — ROS 2 只读诊断（⏳ 需要 ROS 2 环境或贡献者）
+## 后续增量（⏳）
 
-- ROS graph / Topic/QoS / TF / diagnostics 只读快照；
-- rosbag 分析与异常窗口；
-- 控制器与 MoveIt 状态审计；
-- 不开放真机写权限。
-- 现有 Skill 模板：`rh-ros2-health-check`。
-
-## Phase 3 — 视觉与标定（⏳）
-
-- 相机健康检查、标定（内参/手眼）检查；
-- 检测/分割/6D 位姿能力适配；
-- 失败帧集合与多模型对比。
-
-## Phase 4 — 科研实验管理（⏳）
-
-- ExperimentSpec / 实验矩阵 / benchmark；
-- Evidence Bundle 扩展为“可发表单元”（git commit、模型哈希、种子、统计方法）。
-
-## Phase 5 — CAD / SolidWorks / FreeCAD（⏳ 需要 CAD 环境）
-
-- STEP 清单与版本追踪、CAD→URDF 拓扑辅助、网格检查；
-- SolidWorks 仅通过 Windows 可选 bridge（不在第一版承诺）。
-
-## Phase 6 — 人体示教数据参考流程（⏳ 需要合规数据）
-
-- 视频姿态/mocap/IMU 对齐；participant/session 级安全切分；脱敏与外部模型上传拦截。
-
-## Phase 7 — 真机（⏳ 需要明确合作与硬件）
-
-- preflight checklist → 审批 → 受控 Skill 执行 → 状态机；
-- 遵循 docs/safety-boundary.md 的全部约束。
+- DSH Web 客户端插件面板（当前为静态 HTML 查看器）；
+- LeRobot parquet 全量导出、RLDS TFDS 完整导出；
+- 人体示教数据参考流程（需要合规数据）；
+- 跨平台 CI（GitHub Actions 无界面回归）。
 
 ## 社区贡献入口
 
 - 新 Capability adapter、Skill、Scenario、Failure Case、数据 importer/exporter、可视化面板、文档翻译、DSH 兼容测试。
-- 见 CONTRIBUTING.md；每个独立模块可单独发布与使用，不必等待“大平台”。
+- 见 CONTRIBUTING.md；每个独立模块可单独发布与使用，不必等待"大平台"。
 
 ## 长期方向
 

@@ -11,23 +11,25 @@
 
 | Module | Status in this repo |
 |---|---|
-| Robot asset inspection (URDF/MJCF: links, joints, inertials, collisions) | ✅ v0.1 demo |
-| URDF validation & URDF → MJCF conversion | ✅ v0.1 demo |
-| MuJoCo pick-place simulation + fault injection | ✅ v0.1 demo |
-| Perception routing (color segmentation → generic saliency) | ✅ v0.1 demo (minimal) |
-| Deterministic diagnostics (facts / rules / hypotheses) | ✅ v0.1 demo |
-| Data quality audit (CSV/JSONL timeseries) | ✅ v0.1 demo (subset) |
-| Evidence bundles, Markdown reports, standalone timeline.html | ✅ v0.1 demo |
-| ROS 2 read-only diagnostics (graph/TF/QoS/rosbag) | ⏳ roadmap — only a Skill template (`rh-ros2-health-check`) exists |
-| CAD / SolidWorks / FreeCAD | ⏳ roadmap |
-| Camera calibration, detection, segmentation, 6D pose | ⏳ roadmap |
-| Control analysis (PID/trajectory compare, sys-id) | ⏳ roadmap |
-| VLA / VLM model adapters | ⏳ roadmap |
-| Live telemetry web dashboard | ⏳ roadmap (timeline.html is the single-file viewer for now) |
-| Human demonstration data & privacy pipeline | ⏳ roadmap (requires compliant data) |
-| Real-robot experiments | ❌ not in scope for v0.1 — see [docs/safety-boundary.md](docs/safety-boundary.md) |
+| Robot asset inspection (URDF/MJCF/SDF: links, joints, inertials, collisions) | ✅ implemented |
+| CAD: inventory, version compare, mesh inspection, inertia/topology validation, SVG preview, URDF→MJCF / SDF-compat export, asset reports | ✅ implemented (SolidWorks files registered, not parsed) |
+| URDF validation & URDF → MJCF conversion | ✅ implemented |
+| MuJoCo pick-place simulation + fault injection + batch benchmarks + read-only replay + sim-vs-real gap report | ✅ implemented |
+| Perception routing (color segmentation → generic saliency) + camera health/calibration inspection + pose checks + perception comparison | ✅ implemented |
+| Deterministic diagnostics (facts / rules / hypotheses) + telemetry channels/windows/anomaly scan/evidence collection/run compare | ✅ implemented |
+| Data pipeline: inventory, schema, time-sync, alignment, transforms, episodes, annotations, leakage-safe splits, de-identification, rosbag conversion, LeRobot export, dataset versions/cards | ✅ implemented (RLDS = manifest; parquet optional) |
+| Experiment management: spec, matrix, benchmark, metrics, ablation, reports | ✅ implemented |
+| Control analysis: trace metrics, trajectory validation, planned-vs-actual, PID templates/config compare, system identification | ✅ implemented |
+| Embodied model registry: builtin demo models run for real; external/heavy models probed and reported honestly | ✅ implemented (adapter pattern) |
+| Knowledge: docs index/search, error-code lookup, case search | ✅ implemented |
+| Real-robot experiment state machine + preflight | ✅ implemented as state machine; hardware items are skipped (not faked) without an adapter |
+| ROS 2 read-only diagnostics (graph/TF/QoS/controllers) | 🔌 adapter implemented; live probes require the `ros2` CLI; **rosbag2 inspection works without ROS** |
+| Single-file dashboard & timeline viewers | ✅ implemented (static snapshot, not real-time) |
+| Live DSH web client plugin panels | ⏳ roadmap (static HTML viewers for now) |
+| Human demonstration data & privacy pipeline | ✅ implemented (de-identification toolkit); compliant datasets required |
+| SolidWorks API / FreeCAD deep integration, Isaac, real-robot adapters | ⏳ roadmap |
 
-So: **not everything in the product plan is implemented yet — by design.** The plan document is a full product map; this repo follows its "demo-first, progressive scope" principle and delivers the v0.1 demo slice. The [roadmap](docs/roadmap.md) lists the next phases, and each missing module is an entry point for contributors.
+So: the full plan's tool/skill surface is implemented as **demo-grade adapters** — pure-software modules are complete and tested; hardware/backend-dependent modules (ROS 2 live, SolidWorks, real robot, heavy VLA) exist as honest adapters that report `backend: "unavailable"` with install instructions instead of pretending. See [docs/tool-inventory.md](docs/tool-inventory.md) for the full 100-tool list and [docs/roadmap.md](docs/roadmap.md) for what still needs real hardware/backends to validate.
 
 ## 30-second architecture
 
@@ -35,16 +37,22 @@ So: **not everything in the product plan is implemented yet — by design.** The
 DSH profile (rh-demo)
   └─ @robotic-harness/dsh-bundle (this repo)
        ├─ rh-core    project/run store root (.rh/ layout, all inside the workspace)
-       ├─ rh-tools   12 robot-domain tools (asset/simulation/diagnostics/data)
-       └─ rh-skills  6 SKILL.md files (inspect-asset / pick-place-demo / diagnose / benchmark / evidence / data-quality)
+       ├─ rh-tools   ~100 robot-domain tools (10 domains, see docs/tool-inventory.md)
+       └─ rh-skills  25 SKILL.md files (asset/CAD/ROS/control/vision/models/sim/robots/data/experiment/knowledge)
               │  stdio JSON (one-shot process)
               ▼
        robotic_harness_worker (Python 3.10, shipped inside the bundle)
-        ├─ assets       URDF/MJCF inspection, inertia validation, URDF→MJCF conversion
-        ├─ simulation   MuJoCo planar 3-DOF suction-cup pick-place + fault injection
-        ├─ vision       color segmentation → generic segmentation (rule routing)
-        ├─ diagnostics  deterministic rule engine (facts / rules / inferences)
-        └─ data         CSV/JSONL timeseries quality audit
+        ├─ assets/cad   URDF/MJCF/SDF inspection, inertia, topology, mesh, SVG preview, conversion
+        ├─ simulation   MuJoCo pick-place, fault injection, batch benchmark, replay, sim-real gap
+        ├─ vision       color/generic segmentation, camera health, calibration, pose checks
+        ├─ control      trace metrics, trajectory validation, sys-id, PID templates
+        ├─ models       embodied model registry + builtin demo adapters + honest backend probes
+        ├─ diagnostics  rule engine (facts / rules / hypotheses) + telemetry anomaly scan
+        ├─ robots       real-robot experiment state machine + preflight
+        ├─ data         inventory/sync/transform/split/deidentify/rosbag/lerobot/dataset versions
+        ├─ experiment   spec/matrix/benchmark/metrics/ablation
+        ├─ ros          ros2 live probes (adapter) + ROS-free rosbag2 inspection
+        └─ knowledge    docs index/search, error codes, case search
 ```
 
 ## One-command demo (no DSH needed, pure Python)
@@ -52,8 +60,9 @@ DSH profile (rh-demo)
 Requirements: Python ≥ 3.10 with `mujoco`, `numpy`, `opencv-python`, `matplotlib`, `pytest` (the Anaconda `python3.10` env is recommended).
 
 ```sh
-# 1) unit tests
-cd python && python -m pytest tests -q
+# 1) unit tests (each test file runs in its own process to avoid native
+#    DLL collisions between mujoco/cv2/pyarrow — matches the one-shot worker)
+cd python && python run_tests.py
 
 # 2) end-to-end demo: happy run + fault run + diagnostics + evidence + report
 PYTHON=<your python3.10> node scripts/demo.mjs
@@ -61,6 +70,7 @@ PYTHON=<your python3.10> node scripts/demo.mjs
 #   report-run-*.md           experiment report (evidence + hypotheses)
 #   timeline-run-*.html       standalone timeline viewer (open in a browser, no server)
 #   bundle-run-*/             self-contained evidence bundle (manifest + hashes + telemetry + charts)
+#   dashboard.html            single-file dashboard over the run store
 ```
 
 ## Install as a DSH plugin (bundle)
@@ -91,28 +101,28 @@ dsh plugin --profile rh-demo add ./packages/dsh-bundle
 dsh --profile rh-demo --port 3080
 ```
 
-After installation the Agent has the 12 `rh_*` tools and 6 Skills. For example, ask the Agent:
+After installation the Agent has **~100 `rh_*` tools and 25 Skills** across ten domains: assets/CAD, ROS 2 (adapter), control, vision & calibration, embodied models, simulation, real-robot experiments, telemetry & diagnostics, data processing, experiment management, and knowledge retrieval. The complete table (tool → worker command → risk level) lives in [docs/tool-inventory.md](docs/tool-inventory.md).
+
+For example, ask the Agent:
 
 > "Run the Robotic Harness pick-place demo: inspect the demo arm, run one clean simulation and one fault-injected simulation, diagnose the failure, export the evidence bundle and generate the report."
 
-Tools invoke the Python worker (`python -m robotic_harness_worker <command> --input -`); all runs, telemetry, charts and reports are written to the workspace's `.rh/` directory by default.
+Tools invoke the Python worker (`python -m robotic_harness_worker <command> --input -`); all runs, telemetry, charts and reports are written to the workspace's `.rh/` directory by default. A short tour:
 
-### Tool list
-
-| Tool | Risk | Description |
-|---|---|---|
-| `rh_worker_ping` | R0 | worker health & dependency versions |
-| `rh_capability_list` | R0 | capability manifest (asset/simulation/perception/policy/diagnostics/data) |
-| `rh_robot_asset_inspect` | R0 | URDF/MJCF structural inspection (links/joints/inertials/collisions + graded issues) |
-| `rh_urdf_validate` | R0 | URDF validation (tree, positive-definite inertia, limits, axes, mesh paths) |
-| `rh_urdf_to_mjcf` | R1 | controlled URDF→MJCF conversion (MuJoCo compiler + difference report) |
-| `rh_sim_status` | R0 | MuJoCo / renderer / scenario availability |
-| `rh_sim_validate_scenario` | R0 | scenario reachability & parameter validation |
-| `rh_sim_run` | R2 | MuJoCo pick-place run (faults: perception offset / gripper slip / TF offset / sensor noise / occlusion / model timeout) |
-| `rh_diagnose_run` | R0 | deterministic diagnostics: facts / rules / candidate root causes (evidence + counter-evidence + missing evidence + suggested checks) |
-| `rh_evidence_export` | R1 | self-contained evidence bundle (manifest + sha256 + telemetry + charts) |
-| `rh_report_generate` | R1 | Markdown report + standalone timeline.html |
-| `rh_data_quality` | R0 | CSV/JSONL timeseries audit (missing/NaN/out-of-order/duplicates/gaps/constant channels) |
+| Domain | Example tools |
+|---|---|
+| Assets & CAD | `rh_robot_asset_inspect`, `rh_urdf_validate`, `rh_urdf_to_mjcf`, `rh_sdf_validate`, `rh_cad_inventory`, `rh_mesh_inspect`, `rh_inertia_validate`, `rh_robot_topology_validate`, `rh_urdf_preview`, `rh_export_sim_asset`, `rh_generate_asset_report` |
+| ROS 2 | `rh_ros_graph_snapshot`, `rh_ros_topic_profile`, `rh_ros_qos_check`, `rh_ros_tf_audit`, `rh_rosbag_inspect` (ROS-free), `rh_rosbag_start/stop`, `rh_ros_call_whitelisted_action` |
+| Control | `rh_control_trace_analyze`, `rh_trajectory_validate`, `rh_planned_actual_compare`, `rh_pid_experiment_prepare`, `rh_controller_config_compare`, `rh_system_identification_job` |
+| Vision | `rh_camera_health_check`, `rh_calibration_inspect`, `rh_perception_run`, `rh_perception_compare`, `rh_pose_transform_validate`, `rh_annotate_failure_frame` |
+| Models | `rh_model_inventory`, `rh_model_health`, `rh_model_infer_job`, `rh_model_benchmark`, `rh_capability_route_explain`, `rh_policy_rollout_compare` |
+| Simulation | `rh_sim_run`, `rh_sim_fault_inject`, `rh_sim_batch_benchmark`, `rh_sim_replay`, `rh_sim_real_gap_report`, `rh_sim_validate_scenario` |
+| Robots | `rh_robot_preflight`, `rh_experiment_prepare/request_approval/start/pause/safe_cancel/status/finalize` |
+| Telemetry | `rh_telemetry_channels`, `rh_telemetry_window`, `rh_anomaly_scan`, `rh_failure_evidence_collect`, `rh_run_compare`, `rh_diagnose_run`, `rh_timeline_export` |
+| Data | `rh_data_inventory`, `rh_data_time_sync_estimate`, `rh_data_align_streams`, `rh_data_transform_apply`, `rh_data_split_create`, `rh_data_leakage_check`, `rh_data_deidentify`, `rh_data_convert_rosbag`, `rh_data_export_lerobot`, `rh_dataset_version_create`, `rh_dataset_card_generate` |
+| Experiment | `rh_experiment_spec_create`, `rh_experiment_matrix_expand`, `rh_benchmark_start`, `rh_metrics_compute`, `rh_ablation_compare`, `rh_benchmark_report` |
+| Knowledge | `rh_docs_index`, `rh_manual_search`, `rh_error_code_lookup`, `rh_case_search` |
+| Reports | `rh_evidence_export`, `rh_report_generate`, `rh_dashboard_generate` |
 
 ## Demo contents (v0.1)
 
@@ -126,19 +136,21 @@ Tools invoke the Python worker (`python -m robotic_harness_worker <command> --in
 ### Known limitations (stated honestly)
 
 - The suction grasp is a **kinematic implementation** (the object follows the cup while attached), noted in the run config and reports.
-- Perception uses real offscreen rendering when the renderer is available; otherwise it degrades to ground-truth + noise simulation (recorded in telemetry).
-- Simulation results are not real-robot evidence; there is no arbitrary topic-publish, real-robot write, or e-stop-release capability.
-- ROS 2 / SolidWorks / Isaac / real-robot adapters are not implemented yet (see [docs/roadmap.md](docs/roadmap.md)).
+- Perception uses real offscreen rendering when the renderer is available; otherwise it degrades to ground-truth + noise simulation (recorded in telemetry). If OpenCV itself crashes natively (e.g., DLL conflicts in exotic environments), perception degrades to the same fallback instead of failing the run.
+- Live ROS 2 tools require the `ros2` CLI; without it they return a structured `backend: "unavailable"` diagnostic. rosbag2 inspection/conversion works without ROS.
+- Real-robot tools are a state machine + preflight only: hardware items are reported as `skip` (never faked) until a hardware adapter exists. Simulation results are not real-robot evidence; there is no arbitrary topic-publish, real-robot write, or e-stop-release capability.
+- SolidWorks files are registered in inventories but not parsed (commercial software); FreeCAD deep integration is optional.
+- RLDS export produces a manifest skeleton (full TFDS export requires tensorflow); LeRobot export uses parquet when pyarrow is present, CSV otherwise.
 
 ## Repository layout
 
 ```text
 packages/dsh-bundle/   the installable DSH bundle (TS plugins, skills/, worker copy, fixtures, scenarios)
-python/                the robotic_harness_worker Python package + pytest tests
-fixtures/              URDF test assets (valid + deliberately broken)
+python/                the robotic_harness_worker Python package + tests (run_tests.py)
+fixtures/              URDF/SDF test assets + a demo rosbag2 (no ROS needed)
 scenarios/             MuJoCo scenario definitions (JSON)
 scripts/               sync-worker / demo / smoke-worker
-docs/                  architecture, safety boundary, roadmap, demo guide
+docs/                  architecture, safety boundary, roadmap, demo guide, tool inventory, worker contract
 examples/demo-output/  sample one-command demo output
 ```
 

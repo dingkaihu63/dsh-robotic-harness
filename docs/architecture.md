@@ -19,16 +19,44 @@ Robotic Harness 是 DeepSeek Harness 的**下游插件套件**：不复制或修
                   │ stdio JSON（一次性进程，可取消）
 ┌─────────────────▼─────────────────────────────────────────┐
 │ robotic_harness_worker（Python ≥3.10）                     │
-│ assets / simulation / vision / diagnostics / data / report │
+│ assets/cad · simulation · vision/vision_extra · control   │
+│ models · diagnostics/telemetry · robots · data_pipeline   │
+│ experiment · ros · knowledge · report                     │
 └────────────────────────────────────────────────────────────┘
 ```
 
 ### 为什么用一次性 stdio 进程而不是常驻服务
 
 - 零部署成本：bundle 内随附 worker 包副本，`PYTHONPATH` 由 rh-tools 注入；
-- 崩溃隔离：worker 崩溃不影响 DSH 进程；
+- 崩溃隔离：worker 崩溃不影响 DSH 进程；原生库冲突（如 mujoco/cv2/pyarrow 的 Windows DLL 碰撞）只影响当前一次性进程；
 - 协议简单：`python -m robotic_harness_worker <command> --input -`，stdout 返回单个 JSON；
-- 取消语义：工具通过 `exec.signal` 终止子进程。
+- 取消语义：工具通过 `exec.signal` 终止子进程；
+- 因此测试套件也按"每文件独立进程"运行（`python run_tests.py`），与生产形态一致。
+
+## 2. 模块地图（v0.2 全量）
+
+每个领域一个 worker 模块，导出 `COMMANDS`（命令名 → 处理函数）与 `CAPABILITIES`；
+`cli.py` 的 `_DOMAIN_MODULES` 自动注册，TS 侧以数据驱动清单（`TOOL_SPECS`）映射 `rh_*` 工具 → worker 命令（~100 个）。
+
+| 模块 | 命令数 | 覆盖（方案章节） |
+|---|---|---|
+| assets.py | 4+ | URDF/MJCF/SDF 检查、校验、转换（§6） |
+| cad.py | 8 | CAD 清单/版本对比/网格/惯量/拓扑/SVG 预览/导出/报告（§6） |
+| ros.py | 11 | ros2 CLI 适配器 + 免 ROS 的 rosbag2 检查（§7） |
+| control.py | 7 | 跟踪指标/轨迹校验/对比/辨识/PID 模板（§8） |
+| vision_extra.py | 7 | 相机健康/标定/位姿/感知对比/标注（§9） |
+| models.py | 7 | 模型注册表 + 内置演示适配器 + 后端探测 + 规则路由（§10） |
+| simulation.py | 10+ | 抓取/故障注入/批量基准/回放/sim-real gap/SDF（§11） |
+| robots.py | 9 | preflight + 实验状态机（§12） |
+| telemetry.py | 6 | 通道/时间窗/异常扫描/证据收集/Run 对比（§13） |
+| data_pipeline.py | 17 | 清单/同步/对齐/转换/切分/去标识化/rosbag/LeRobot/版本（§14） |
+| experiment.py | 6 | spec/矩阵/基准/指标/消融/报告（§15） |
+| knowledge.py | 4 | 文档索引/检索/错误码/案例（§16） |
+| report.py | 4+ | 证据包/报告/时间线/仪表盘/回放 |
+
+**硬件/后端依赖模块的诚实降级**：`ros2` CLI、SolidWorks、真机适配器、重型模型缺失时，
+命令返回 `{ok: true, backend: "unavailable", reason, instructions}` 结构化诊断（不是报错），
+Agent 仍可据此给出可操作的下一步。
 
 ## 2. 统一领域模型（可移植，无 DSH 依赖）
 
@@ -99,5 +127,8 @@ Python 侧 `core.py` 定义最小领域对象，全部序列化为纯 JSON（未
 ## 8. 兼容性声明
 
 - DSH：`@deepseek-ai/dsh` ≥ 0.1.0-rc.6（CLI、bundle/profile 机制、Tool/Skill 注册 API）。
-- Python：≥ 3.10；仿真需要 `mujoco`（可选 `numpy`/`opencv-python`/`matplotlib`）。
+- Python：≥ 3.10；仿真需要 `mujoco`（可选 `numpy`/`opencv-python`/`matplotlib`/`Pillow`/`pyarrow`）。
+- Windows 原生库注意：同一进程内同时使用 mujoco + OpenCV + pyarrow 可能触发 OpenCV
+  "Unknown C++ exception"（DLL 冲突）。生产 worker 每次命令一个进程，天然隔离；
+  本仓库测试用 `python run_tests.py` 逐文件独立进程运行，规避同一问题。
 - 已知上游限制：`@deepseek-ai/dsh-web-app` 的 npm 发布依赖私有包 `@deepseek-ai/dsh-frontend`，从公共 registry 直接安装 web-app bundle 可能失败；本仓库演示通过 `dsh plugin add ./packages/dsh-bundle`（不依赖该包）加载，Web 面板由内置 dsh 安装目录提供。

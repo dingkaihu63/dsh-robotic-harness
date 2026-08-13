@@ -572,3 +572,89 @@ def inspect_asset(path: str) -> AssetInspection:
     raise ValueError(
         f"unsupported asset format for {path!r}: expected .urdf, .xacro (expanded), .xml or .mjcf"
     )
+
+
+# ---------------------------------------------------------------------------
+# SDF
+# ---------------------------------------------------------------------------
+
+def validate_sdf(path: str) -> dict[str, Any]:
+    """Validate an SDF file (XML structure + common robotics checks).
+
+    SDF validation is best-effort: the full Gazebo semantics require the
+    Gazebo toolchain. This checker covers structure, links, joints,
+    inertials and units; deeper checks are delegated to the simulator.
+    """
+    issues: list[Issue] = []
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError as error:
+        return {
+            "ok": False,
+            "format": "sdf",
+            "path": path,
+            "issues": [{"severity": "error", "code": "sdf.bad_xml", "message": f"not well-formed XML: {error}"}],
+            "summary": {},
+            "note": "SDF validation is structural only; full semantics require Gazebo.",
+        }
+    root = tree.getroot()
+    if root.tag != "sdf":
+        issues.append(Issue("error", "sdf.bad_root", f"expected <sdf> root, got <{root.tag}>"))
+    version = _el_attr(root, "version")
+    if version and version not in ("1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"):
+        issues.append(Issue("warning", "sdf.unknown_version", f"unfamiliar SDF version {version!r}"))
+
+    summary: dict[str, Any] = {"format": "sdf", "version": version or "unknown", "models": []}
+    for model in root.findall(".//model"):
+        model_name = _el_attr(model, "name")
+        entry: dict[str, Any] = {"name": model_name, "links": 0, "joints": 0, "inertialCount": 0}
+        links = model.findall("link")
+        joints = model.findall("joint")
+        entry["links"] = len(links)
+        entry["joints"] = len(joints)
+        seen_names: set[str] = set()
+        for link in links:
+            name = _el_attr(link, "name")
+            if name in seen_names:
+                issues.append(Issue("error", "sdf.duplicate_link", f"duplicate link {name!r} in model {model_name!r}"))
+            seen_names.add(name)
+            if link.find("inertial") is not None:
+                entry["inertialCount"] += 1
+            else:
+                issues.append(
+                    Issue(
+                        "warning",
+                        "sdf.missing_inertial",
+                        f"link {name!r} in model {model_name!r} has no <inertial>",
+                    )
+                )
+            mass_el = link.find("inertial/mass")
+            if mass_el is not None:
+                try:
+                    mass = float(mass_el.text or "0")
+                except ValueError:
+                    mass = 0.0
+                if mass <= 0:
+                    issues.append(Issue("error", "sdf.non_positive_mass", f"link {name!r} mass must be positive, got {mass}"))
+        for joint in joints:
+            jtype = _el_attr(joint, "type")
+            if jtype not in ("revolute", "prismatic", "fixed", "continuous", "ball", "universal", "screw", "gearbox"):
+                issues.append(Issue("warning", "sdf.unknown_joint_type", f"joint {_el_attr(joint, 'name')!r} type {jtype!r}"))
+            if jtype in ("revolute", "prismatic") and joint.find("axis/limit") is None:
+                issues.append(
+                    Issue(
+                        "warning",
+                        "sdf.missing_limit",
+                        f"joint {_el_attr(joint, 'name')!r} ({jtype}) has no axis limit",
+                    )
+                )
+        summary["models"].append(entry)
+
+    return {
+        "ok": not any(i.severity == "error" for i in issues),
+        "format": "sdf",
+        "path": path,
+        "summary": summary,
+        "issues": [i.to_dict() for i in issues],
+        "note": "SDF validation is structural only; full semantics require Gazebo.",
+    }

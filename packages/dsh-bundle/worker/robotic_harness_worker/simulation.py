@@ -894,6 +894,160 @@ def render_scene_image(run_id: str, xml: str, out_dir: str) -> Optional[str]:
         return None
 
 
+def sim_batch_benchmark(
+    cells: list[dict[str, Any]],
+    store: RunStore | None = None,
+    out_dir: str | None = None,
+) -> dict[str, Any]:
+    """Run a small matrix of pick-place cells and aggregate metrics.
+
+    Each cell: ``{label?, fault?, seed?, scenario?}``. Results are aggregated
+    per label (or per cell when unlabeled) into success rate and averaged
+    metrics. This is a demo-scale benchmark, not a statistical study.
+    """
+    results: list[dict[str, Any]] = []
+    for index, cell in enumerate(cells):
+        scenario_config = cell.get("scenario") or json.loads(json.dumps(SCENARIO_PICK_PLACE))
+        seed = int(cell.get("seed", 42 + index))
+        run, _ = run_pick_place(scenario_config, cell.get("fault", {}), seed, store=store)
+        label = cell.get("label") or f"cell-{index}"
+        results.append(
+            {
+                "label": label,
+                "seed": seed,
+                "runId": run.id,
+                "success": bool(run.metrics.get("success")),
+                "grasped": bool(run.metrics.get("grasped")),
+                "slipped": bool(run.metrics.get("slipped")),
+                "inTargetZone": bool(run.metrics.get("inTargetZone")),
+                "trackingErrorRms": run.metrics.get("trackingErrorRms"),
+                "durationS": run.metrics.get("durationS"),
+                "anomalies": [a.kind for a in run.anomalies],
+                "fault": cell.get("fault", {}),
+            }
+        )
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        groups.setdefault(result["label"], []).append(result)
+    summary = {}
+    for label, group in groups.items():
+        success_rate = sum(1 for r in group if r["success"]) / len(group)
+        rms_values = [r["trackingErrorRms"] for r in group if r["trackingErrorRms"] is not None]
+        summary[label] = {
+            "runs": len(group),
+            "successRate": round(success_rate, 3),
+            "graspedRate": round(sum(1 for r in group if r["grasped"]) / len(group), 3),
+            "slippedCount": sum(1 for r in group if r["slipped"]),
+            "avgTrackingErrorRms": round(sum(rms_values) / len(rms_values), 5) if rms_values else None,
+            "typicalAnomalies": sorted({a for r in group for a in r["anomalies"]}),
+        }
+
+    payload = {"ok": True, "cells": len(results), "results": results, "summary": summary,
+               "note": "simulation-only benchmark; not a statistical study and not real-robot evidence"}
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "benchmark.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        payload["path"] = path
+    return payload
+
+
+def sim_real_gap(
+    sim_run_path: str,
+    real_csv_path: str,
+    channel_map: dict[str, str],
+    time_columns: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compare shared numeric channels between a simulated run and real data.
+
+    ``channel_map`` maps sim telemetry channels (e.g. ``q.0``) to real CSV
+    columns (e.g. ``joint0``). The comparison is distribution-level
+    (mean/std/percentiles); the report explicitly refuses to draw
+    real-robot safety conclusions.
+    """
+    from .diagnostics import load_run_data
+
+    try:
+        import csv as _csv  # noqa: PLC0415
+    except ImportError:  # pragma: no cover
+        raise
+
+    run, telemetry = load_run_data(sim_run_path)
+    real_rows: list[dict[str, float]] = []
+    with open(real_csv_path, encoding="utf-8", newline="") as handle:
+        reader = _csv.DictReader(handle)
+        for row in reader:
+            parsed = {}
+            for column in channel_map.values():
+                try:
+                    parsed[column] = float(row[column])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            real_rows.append(parsed)
+
+    def stats(values: list[float]) -> dict[str, float]:
+        array = np.array(values, dtype=float)
+        if array.size == 0:
+            return {}
+        return {
+            "mean": round(float(array.mean()), 6),
+            "std": round(float(array.std()), 6),
+            "min": round(float(array.min()), 6),
+            "p10": round(float(np.percentile(array, 10)), 6),
+            "p50": round(float(np.percentile(array, 50)), 6),
+            "p90": round(float(np.percentile(array, 90)), 6),
+            "max": round(float(array.max()), 6),
+        }
+
+    channels: dict[str, Any] = {}
+    largest_gap: dict[str, Any] | None = None
+    for sim_channel, real_column in channel_map.items():
+        sim_values = []
+        for row in telemetry:
+            value = row
+            ok = True
+            for part in sim_channel.split("."):
+                if isinstance(value, dict) and part in value:
+                    value = value[part]
+                elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+                    value = value[int(part)]
+                else:
+                    ok = False
+                    break
+            if ok and isinstance(value, (int, float)):
+                sim_values.append(float(value))
+        real_values = [row[real_column] for row in real_rows if real_column in row]
+        sim_stats = stats(sim_values)
+        real_stats = stats(real_values)
+        if sim_stats and real_stats:
+            gap = abs(sim_stats["mean"] - real_stats["mean"])
+            gap_relative = gap / max(abs(real_stats["mean"]), 1e-9)
+            if largest_gap is None or gap_relative > largest_gap["relativeGap"]:
+                largest_gap = {
+                    "channel": sim_channel,
+                    "simMean": sim_stats["mean"],
+                    "realMean": real_stats["mean"],
+                    "gap": round(gap, 6),
+                    "relativeGap": round(gap_relative, 4),
+                }
+        channels[sim_channel] = {"sim": sim_stats, "real": real_stats, "samples": {"sim": len(sim_values), "real": len(real_values)}}
+
+    return {
+        "ok": True,
+        "simRun": run.id,
+        "realData": real_csv_path,
+        "channels": channels,
+        "largestGap": largest_gap,
+        "verdict": "simulation and real data differ; simulation is not real-robot evidence",
+        "notes": [
+            "distribution-level comparison only; timestamps and control modes are not aligned here",
+            "a gap in one channel does not imply a single root cause — see diagnostics workflow",
+        ],
+    }
+
+
 def run_pick_place(
     scenario_config: dict[str, Any],
     fault: dict[str, Any],
