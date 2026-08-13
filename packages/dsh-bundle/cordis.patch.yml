@@ -1,0 +1,20 @@
+# Robotic Harness bundle patch: one insert over the profile root.
+#
+# The rh-tools row config points at the Python worker. `workerDir` is
+# resolved at load time from the installed package (see src/worker.ts), so
+# the values below only matter as fallbacks when the environment differs.
+
+- insert:
+    - id: rh-core
+      name: '@robotic-harness/dsh-bundle/core'
+      config:
+        storeRoot: ''
+
+    - id: rh-tools
+      name: '@robotic-harness/dsh-bundle/tools'
+      config:
+        pythonPath: python
+        timeoutMs: 180000
+
+    - id: rh-skills
+      name: '@robotic-harness/dsh-bundle/skills'

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robotic-harness-worker"
+version = "0.1.0"
+description = "Robotic Harness worker: asset inspection, MuJoCo simulation, diagnostics and data utilities for the DeepSeek Harness plugin suite."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Robotic Harness contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+simulation = ["mujoco>=3.0", "numpy>=1.26"]
+vision = ["opencv-python-headless>=4.8", "Pillow>=10"]
+charts = ["matplotlib>=3.8"]
+all = [
+    "mujoco>=3.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10",
+    "matplotlib>=3.8",
+]
+
+[project.scripts]
+rh-worker = "robotic_harness_worker.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["robotic_harness_worker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

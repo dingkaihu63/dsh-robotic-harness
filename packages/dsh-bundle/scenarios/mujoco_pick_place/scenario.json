@@ -1,0 +1,21 @@
+{
+  "name": "mujoco_pick_place",
+  "description": "Planar 3-DOF arm with suction gripper: pick a red box from the table and place it in the target zone.",
+  "arm": {
+    "shoulderXyz": [0.0, 0.0, 0.45],
+    "linkLengths": [0.22, 0.19],
+    "cupReach": 0.083,
+    "elbow": "down",
+    "jointRanges": {
+      "shoulder": [-3.0, 3.0],
+      "elbow": [-2.9, 2.9],
+      "wrist": [-3.1416, 3.1416]
+    }
+  },
+  "table": { "topZ": 0.17, "halfExtents": [0.4, 0.3, 0.015] },
+  "object": { "size": 0.02, "initXyz": [0.3, 0.0, 0.19], "color": "red", "mass": 0.1 },
+  "targetZone": { "center": [-0.16, 0.0, 0.17], "radius": 0.05 },
+  "camera": { "pos": [0.45, -1.2, 0.68], "fovy": 50.0, "width": 640, "height": 480 },
+  "sim": { "dt": 0.01, "maxSteps": 3600, "telemetryEvery": 10, "servoKp": 200.0, "servoKv": 25.0 },
+  "grasp": { "attachRadius": 0.032, "faceGap": 0.006 }
+}

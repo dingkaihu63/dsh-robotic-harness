@@ -1,0 +1,34 @@
+# Node
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist-python/
+
+# Robotic Harness run outputs (never commit experiment artifacts)
+.rh/
+examples/demo-output/
+*.run.json
+
+# Tooling and caches (kept off C: on purpose; see docs/architecture.md)
+.pnpm-store/
+.dsh-home/
+.npm-cache/
+.pip-cache/
+.tools/
+
+# OS
+Thumbs.db
+.DS_Store
+MUJOCO_LOG.TXT
+
+# Editors
+.vscode/
+.idea/

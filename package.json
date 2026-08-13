@@ -1,0 +1,26 @@
+{
+  "name": "robotic-harness-dsh",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Robotic Harness — an embodied-intelligence research plugin suite for DeepSeek Harness (demo)",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test:python": "cd python && \"${PYTHON:-python}\" -m pytest tests -q",
+    "demo": "node scripts/demo.mjs",
+    "sync-worker": "node scripts/sync-worker.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "license": "MIT"
+}
