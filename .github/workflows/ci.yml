@@ -58,7 +58,14 @@ jobs:
       - name: Worker copy is in sync
         run: |
           node scripts/sync-worker.mjs
-          git diff --exit-code -- packages/dsh-bundle/worker packages/dsh-bundle/fixtures packages/dsh-bundle/scenarios
+          # git status --porcelain also catches UNTRACKED files that a bare
+          # `git diff --exit-code` would silently ignore.
+          CHANGED=$(git status --porcelain -- packages/dsh-bundle/worker packages/dsh-bundle/fixtures packages/dsh-bundle/scenarios)
+          if [ -n "$CHANGED" ]; then
+            echo "bundle copies are out of sync; run node scripts/sync-worker.mjs and commit:"
+            echo "$CHANGED"
+            exit 1
+          fi
 
       - name: Bundle → worker smoke test
         run: node scripts/smoke-worker.mjs
