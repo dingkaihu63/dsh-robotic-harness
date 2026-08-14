@@ -1143,6 +1143,101 @@ const TOOL_SPECS: ToolSpec[] = [
     },
   },
 
+  // --- research & literature -------------------------------------------------
+  {
+    name: 'rh_literature_search',
+    description:
+      'Search public academic literature (arXiv / Semantic Scholar) for a problem or topic. Returns titles, authors, years, abstracts and source URLs. Best-effort network: on failure the backend is reported as unavailable — never fabricate results. Literature is evidence, not verdicts; verify before citing.',
+    command: 'literature-search',
+    parameters: {
+      query: { type: 'string', required: true, description: 'Problem or topic to search for' },
+      maxResults: { type: 'number', description: 'Max results per source; default 8' },
+      sources: { type: 'array', description: 'Sources: arxiv (default), semantic-scholar', items: { type: 'string' } },
+    },
+  },
+  {
+    name: 'rh_problem_solutions',
+    description:
+      'For a user problem at ANY stage (experiment/model/simulation/data/control/perception), search literature and produce ranked evidence cards plus a solution-proposal scaffold for the user to choose from. The worker only matches keywords — the Agent synthesizes options and the user makes the final call; conclusions must not be presented as verified.',
+    command: 'problem-solutions',
+    parameters: {
+      problem: { type: 'string', required: true, description: 'The problem to find solutions for' },
+      stage: { type: 'string', description: 'experiment | model | simulation | data | control | perception | general' },
+      context: { type: 'string', description: 'Additional context (hardware, env, constraints)' },
+      maxPapers: { type: 'number', description: 'Max papers to consider; default 6' },
+      outPath: { type: 'string', description: 'Save the proposal scaffold JSON here' },
+    },
+  },
+
+  // --- autonomous training ---------------------------------------------------
+  {
+    name: 'rh_train_server_check',
+    description:
+      'List explicitly configured training servers (<storeRoot>/train-servers.json) and probe SSH connectivity with a read-only echo. No server config → backend unavailable with setup instructions. Never assume a server exists without config.',
+    command: 'train-server-check',
+    parameters: {},
+  },
+  {
+    name: 'rh_train_plan_create',
+    description:
+      'Create an auditable training plan (objective, model, hyperparameters, dataset ids, phases) saved as JSON + Markdown with status=draft. Planning only — it never submits anything.',
+    command: 'train-plan-create',
+    parameters: {
+      objective: { type: 'string', required: true, description: 'Training objective' },
+      model: { type: 'string', description: 'Model name; default placeholder-model' },
+      serverId: { type: 'string', description: 'Configured training server id (optional for dry-run)' },
+      epochs: { type: 'number', description: 'Default 10' },
+      batchSize: { type: 'number', description: 'Default 32' },
+      learningRate: { type: 'number', description: 'Default 1e-3' },
+      optimizer: { type: 'string', description: 'Default adam' },
+      validationSplit: { type: 'number', description: 'Default 0.2' },
+      datasetIds: { type: 'array', description: 'Data sources: local:path or HF dataset id', items: { type: 'string' } },
+      planId: { type: 'string', description: 'Custom plan id (default auto)' },
+    },
+  },
+  {
+    name: 'rh_train_data_discovery',
+    description:
+      'Search public datasets (Hugging Face API) for supplementary training data. Best-effort network; returns backend unavailable on failure. Datasets are candidates only — check license and quality before adding them to a plan.',
+    command: 'train-data-discovery',
+    parameters: {
+      query: { type: 'string', required: true, description: 'Dataset search query (e.g. robot manipulation)' },
+      maxResults: { type: 'number', description: 'Default 10' },
+    },
+  },
+  {
+    name: 'rh_train_job_prepare',
+    description:
+      'Prepare a training job from an approved plan: generates train.py (template-based), launcher.sh and a plan snapshot locally — dry-run by default. Real remote submission requires dryRun:false AND confirm:true in the same call plus a reachable configured server; the remote command is allowlisted (only our generated launcher in the configured work dir). Never submit without explicit human confirmation.',
+    command: 'train-job-prepare',
+    parameters: {
+      planId: { type: 'string', required: true, description: 'Plan id from train-plan-create' },
+      dryRun: { type: 'boolean', description: 'Default true — only prepare artifacts locally' },
+      confirm: { type: 'boolean', description: 'Human confirmation; required for remote submission' },
+      serverId: { type: 'string', description: 'Override the plan server id' },
+    },
+  },
+  {
+    name: 'rh_train_job_status',
+    description:
+      'Follow a prepared/submitted training job: job record plus the recent log tail (local run.log, or remote tail for submitted jobs on configured servers).',
+    command: 'train-job-status',
+    parameters: {
+      jobId: { type: 'string', required: true, description: 'Job id (= plan id)' },
+    },
+  },
+  {
+    name: 'rh_train_report',
+    description:
+      'Generate a statistical training report from a training log (epoch,loss[,val_loss]): convergence verdict, relative improvement, Markdown report file. Statistical only — never a release verdict.',
+    command: 'train-report',
+    parameters: {
+      jobId: { type: 'string', description: 'Job id to read run.log from the store' },
+      logPath: { type: 'string', description: 'Explicit log CSV path (alternative to jobId)' },
+      outPath: { type: 'string', description: 'Report output path' },
+    },
+  },
+
   // --- reports & dashboard --------------------------------------------------
   {
     name: 'rh_evidence_export',

@@ -421,6 +421,8 @@ _DOMAIN_MODULES = [
     "knowledge",
     "memory",
     "robots",
+    "research",
+    "training",
 ]
 
 

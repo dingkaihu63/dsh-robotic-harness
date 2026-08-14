@@ -53,7 +53,9 @@
 | 🧬 **数据处理** | 清单、schema、时间同步、对齐、非破坏转换、episode、防泄漏切分、去标识化、rosbag 转换、LeRobot 导出、数据集版本与数据卡 |
 | 🔬 **实验管理** | 定义 → 矩阵 → 基准 → 指标 → 消融 → 报告 |
 | 🤖 **真机流程** | preflight 清单 + 实验状态机（无适配器时真机项如实跳过） |
-| 📚 **知识检索** | 文档索引/检索、错误码查询、诊断案例检索 |
+| 📚 **知识检索** | 文档索引/检索、错误码查询、诊断案例检索、项目记忆（检索/记录） |
+| 📖 **文献检索** | 公开文献检索（arXiv / Semantic Scholar）+ 任意阶段问题→带证据的候选方案 |
+| 🚀 **自主训练** | 服务器探测 → 训练计划 → 补充数据集发现 → 作业准备（默认 dry-run）→ 确认后远程提交 → 状态跟踪 → 报告 |
 | 📊 **报告** | 证据包（哈希清单）、Markdown 报告、独立时间线与仪表盘查看器 |
 
 ## 📸 演示截图
@@ -180,7 +182,7 @@ Agent 会一步步驱动 `rh_*` 工具并把每一步结果留作证据。
 
 ## 🧩 工具与能力面
 
-**约 100 个 `rh_*` 工具 + 25 个 Skill，覆盖十二个领域。** 完整对照表（工具 → worker 命令 → 风险分级）见 [docs/tool-inventory.md](docs/tool-inventory.md)。速览：
+**约 110 个 `rh_*` 工具 + 27 个 Skill，覆盖十四个领域。** 完整对照表（工具 → worker 命令 → 风险分级）见 [docs/tool-inventory.md](docs/tool-inventory.md)。速览：
 
 | 领域 | 代表工具 |
 |---|---|
@@ -195,13 +197,15 @@ Agent 会一步步驱动 `rh_*` 工具并把每一步结果留作证据。
 | 数据 | `rh_data_inventory` · `rh_data_time_sync_estimate` · `rh_data_align_streams` · `rh_data_transform_apply` · `rh_data_split_create` · `rh_data_leakage_check` · `rh_data_deidentify` · `rh_data_convert_rosbag` · `rh_data_export_lerobot` · `rh_dataset_version_create` · `rh_dataset_card_generate` |
 | 实验 | `rh_experiment_spec_create` · `rh_experiment_matrix_expand` · `rh_benchmark_start` · `rh_metrics_compute` · `rh_ablation_compare` · `rh_benchmark_report` |
 | 知识/记忆 | `rh_docs_index` · `rh_manual_search` · `rh_error_code_lookup` · `rh_case_search` · `rh_memory_retrieve` · `rh_memory_ingest` |
+| 文献检索 | `rh_literature_search` · `rh_problem_solutions` —— 针对当前遇到的问题（任意阶段）检索公开文献，得到带证据的候选方案供你选择 |
+| 自主训练 | `rh_train_server_check` · `rh_train_plan_create` · `rh_train_data_discovery` · `rh_train_job_prepare` · `rh_train_job_status` · `rh_train_report` —— 规划训练、检索补充数据集、本地准备作业，且只有在你明确确认后才提交到已配置的服务器 |
 | 报告 | `rh_evidence_export` · `rh_report_generate` · `rh_dashboard_generate` |
 
 ### 实现状态
 
 方案中的工具/Skill 面已按 **Demo 级适配器** 全部实现：
 
-- ✅ **纯软件模块**——完整且有测试（资产、CAD、仿真、控制、视觉、模型、诊断、遥测、数据、实验、知识）。
+- ✅ **纯软件模块**——完整且有测试（资产、CAD、仿真、控制、视觉、模型、诊断、遥测、数据、实验、知识、记忆、文献、训练）。
 - 🔌 **后端依赖模块**——ROS 2 实机探测、SolidWorks 解析、真机适配器、重型 VLA 模型以诚实适配器形式存在：后端缺失时返回结构化 `backend:"unavailable"` 诊断并附安装指引，**绝不假装通过**。rosbag2 的检查与转换无需 ROS。
 
 ## 🎯 Demo（MuJoCo 抓取）
@@ -223,6 +227,8 @@ Agent 会一步步驱动 `rh_*` 工具并把每一步结果留作证据。
 - 真机工具是状态机 + preflight：无硬件适配器时真机项如实标记 `skip`（绝不假装通过）。仿真结果不是真机证据；不提供任意 Topic 发布、真机写操作或急停解除能力。
 - SolidWorks 文件只登记不解析（商业软件）；FreeCAD 深度集成可选。
 - RLDS 导出为 manifest 骨架（完整 TFDS 导出需 tensorflow）；LeRobot 导出在 pyarrow 可用时用 parquet，否则降级 CSV。
+- 文献检索与数据集发现是尽力而为的网络调用：API 不可达时返回结构化 `backend:"unavailable"` 结果，绝不伪造论文或数据集。
+- 训练工具是工作流脚手架：生成的训练脚本是确定性模板占位（非真实模型代码）；远程提交要求显式配置的服务器 + 你的确认，且只执行白名单命令。
 
 ## 🌊 未来愿景
 

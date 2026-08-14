@@ -21,7 +21,7 @@ Robotic Harness 是 DeepSeek Harness 的**下游插件套件**：不复制或修
 │ robotic_harness_worker（Python ≥3.10）                     │
 │ assets/cad · simulation · vision/vision_extra · control   │
 │ models · diagnostics/telemetry · robots · data_pipeline   │
-│ experiment · ros · knowledge · report                     │
+│ experiment · ros · knowledge · memory · research · training │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,6 +53,8 @@ Robotic Harness 是 DeepSeek Harness 的**下游插件套件**：不复制或修
 | experiment.py | 6 | spec/矩阵/基准/指标/消融/报告（§15） |
 | knowledge.py | 4 | 文档索引/检索/错误码/案例（§16） |
 | memory.py | 2 | 项目记忆：相似历史案例检索（关键词+异常类型打分，附依据）与人工结论记录；`diagnose-run` 自动附带 relatedCases |
+| research.py | 2 | 公开文献检索（arXiv/Semantic Scholar，尽力而为网络）+ 问题→候选方案脚手架（§16） |
+| training.py | 6 | 训练服务器探测/训练计划/补充数据集检索/作业准备（默认 dry-run，远程提交需显式确认）/状态/报告（§17） |
 | report.py | 4+ | 证据包/报告/时间线/仪表盘/回放 |
 
 **硬件/后端依赖模块的诚实降级**：`ros2` CLI、SolidWorks、真机适配器、重型模型缺失时，

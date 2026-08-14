@@ -158,6 +158,24 @@
 | rh_memory_retrieve | memory-retrieve | R0 | 项目记忆：按 run/症状检索最相似历史案例（关键词+异常类型打分，附依据） |
 | rh_memory_ingest | memory-ingest | R1 | 记录人工结论；verified 案例在检索中优先 |
 
+## 文献检索与方案（research）
+
+| DSH 工具 | Worker 命令 | 风险 | 说明 |
+|---|---|---|---|
+| rh_literature_search | literature-search | R0 | 公开文献检索（arXiv / Semantic Scholar，尽力而为网络；失败返回 `backend:"unavailable"`，不伪造结果） |
+| rh_problem_solutions | problem-solutions | R0 | 任意阶段（实验/模型/仿真/数据/控制/感知）问题→文献证据卡 + 候选方案脚手架供用户选择；结论需人工确认 |
+
+## 自主训练（training）
+
+| DSH 工具 | Worker 命令 | 风险 | 说明 |
+|---|---|---|---|
+| rh_train_server_check | train-server-check | R1 | 读取 `<storeRoot>/train-servers.json` 显式配置的训练服务器并做只读连通性探测 |
+| rh_train_plan_create | train-plan-create | R0 | 训练计划（目标/超参/数据/阶段），JSON+Markdown，status=draft |
+| rh_train_data_discovery | train-data-discovery | R0 | 补充数据集检索（Hugging Face API，尽力而为） |
+| rh_train_job_prepare | train-job-prepare | R3 | 生成训练脚本/启动器（默认 dry-run 仅本地准备）；远程提交需 `dryRun:false` + `confirm:true` 且命令白名单化 |
+| rh_train_job_status | train-job-status | R1 | 作业状态与日志尾部（本地或远程） |
+| rh_train_report | train-report | R0 | 训练日志统计报告（收敛判断，非发布结论） |
+
 ## 报告与面板
 
 | DSH 工具 | Worker 命令 | 风险 | 说明 |

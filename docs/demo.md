@@ -13,6 +13,9 @@ Demo 依次执行：
 1. **正常 Run**（seed 42，无故障）→ 期望 `success: true`，物体落在目标区 `[-0.16, 0, 0.17] ± 0.05`。
 2. **故障 Run**（seed 43，`perceptionOffsetPx [18,6] + gripperSlip + tfOffset [0.015, 0]`）→ 期望 `success: false`，异常含 `grasp_missed` / `gripper_slip`。
 3. 每个 Run：规则诊断（`diagnose-run`）→ 证据包（`evidence-export`）→ Markdown 报告 + timeline.html。
+4. **文献与训练流**（离线安全）：
+   - `problem-solutions`：按“gripper slippage during pick and place”检索公开文献 → 证据卡 + 候选方案脚手架（网络不可用时如实返回 `backend:"unavailable"`）；
+   - `train-plan-create` → `train-job-prepare`（dry-run，只生成本地产物）→ 写一份模拟训练日志 → `train-report`（收敛统计）。
 
 ## 2. 预期输出
 
@@ -24,7 +27,15 @@ run run-xxxxxxxx: success=true
   evidence  : .../bundle-run-xxxxxxxx
 run run-yyyyyyyy: success=false
   ...
+
+=== research & training flow ===
+solutions   : backend=arxiv candidates=3
+plan        : plan-xxxxxxxx (status=draft)
+job prepare : dryRun=true artifacts=3
+report      : verdict="收敛良好" improvement=0.8
 ```
+
+> `solutions` 行在无网络时显示 `backend=unavailable candidates=0`，这是设计行为：文献检索是尽力而为，绝不伪造论文。
 
 `examples/demo-output/` 下：
 

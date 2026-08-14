@@ -53,7 +53,9 @@ from CAD/URDF inspection to MuJoCo pick-and-place, fault injection, evidence-bas
 | 🧬 **Data pipeline** | Inventory, schema, time-sync, alignment, non-destructive transforms, episodes, leakage-safe splits, de-identification, rosbag conversion, LeRobot export, dataset versions & cards |
 | 🔬 **Experiments** | Spec → matrix → benchmark → metrics → ablation → report |
 | 🤖 **Real-robot flow** | Preflight checklist + experiment state machine (hardware items skipped honestly without an adapter) |
-| 📚 **Knowledge** | Docs index/search, error-code lookup, diagnostic-case search |
+| 📚 **Knowledge** | Docs index/search, error-code lookup, diagnostic-case search, project memory (retrieve/ingest) |
+| 📖 **Research** | Literature search (arXiv / Semantic Scholar) + problem→solution proposals with evidence for any stage |
+| 🚀 **Autonomous training** | Server check → training plan → supplementary dataset discovery → job prepare (dry-run default) → confirmed remote submit → status → report |
 | 📊 **Reports** | Evidence bundles (hash manifests), Markdown reports, standalone timeline & dashboard viewers |
 
 ## 📸 Screenshots
@@ -184,7 +186,7 @@ The Agent will drive the `rh_*` tools step by step and keep every result as evid
 
 ## 🧩 Tool & skill surface
 
-**~100 `rh_*` tools and 25 Skills across twelve domains.** The complete table (tool → worker command → risk level) lives in [docs/tool-inventory.md](docs/tool-inventory.md). A quick tour:
+**~110 `rh_*` tools and 27 Skills across fourteen domains.** The complete table (tool → worker command → risk level) lives in [docs/tool-inventory.md](docs/tool-inventory.md). A quick tour:
 
 | Domain | Example tools |
 |---|---|
@@ -199,13 +201,15 @@ The Agent will drive the `rh_*` tools step by step and keep every result as evid
 | Data | `rh_data_inventory` · `rh_data_time_sync_estimate` · `rh_data_align_streams` · `rh_data_transform_apply` · `rh_data_split_create` · `rh_data_leakage_check` · `rh_data_deidentify` · `rh_data_convert_rosbag` · `rh_data_export_lerobot` · `rh_dataset_version_create` · `rh_dataset_card_generate` |
 | Experiment | `rh_experiment_spec_create` · `rh_experiment_matrix_expand` · `rh_benchmark_start` · `rh_metrics_compute` · `rh_ablation_compare` · `rh_benchmark_report` |
 | Knowledge & memory | `rh_docs_index` · `rh_manual_search` · `rh_error_code_lookup` · `rh_case_search` · `rh_memory_retrieve` · `rh_memory_ingest` |
+| Research & literature | `rh_literature_search` · `rh_problem_solutions` — search public literature for the problem you're facing (any stage), get evidence-backed options to choose from |
+| Autonomous training | `rh_train_server_check` · `rh_train_plan_create` · `rh_train_data_discovery` · `rh_train_job_prepare` · `rh_train_job_status` · `rh_train_report` — plan a training run, find supplementary datasets, prepare the job locally, and only with your explicit confirmation submit it to a configured server |
 | Reports | `rh_evidence_export` · `rh_report_generate` · `rh_dashboard_generate` |
 
 ### Implementation status
 
 The full plan's tool/skill surface is implemented as **demo-grade adapters**:
 
-- ✅ **Pure-software modules** — complete and tested (assets, CAD, simulation, control, vision, models, diagnostics, telemetry, data, experiment, knowledge).
+- ✅ **Pure-software modules** — complete and tested (assets, CAD, simulation, control, vision, models, diagnostics, telemetry, data, experiment, knowledge, memory, research, training).
 - 🔌 **Backend-dependent modules** — ROS 2 live probes, SolidWorks parsing, real-robot adapters, heavy VLA models exist as honest adapters: when the backend is missing they return a structured `backend: "unavailable"` diagnostic with install instructions, **never a fake pass**. rosbag2 inspection/conversion works without ROS.
 
 ## 🎯 The demo (MuJoCo pick-and-place)
@@ -227,6 +231,8 @@ The full plan's tool/skill surface is implemented as **demo-grade adapters**:
 - Real-robot tools are a state machine + preflight only: hardware items are reported as `skip` (never faked) until a hardware adapter exists. Simulation results are not real-robot evidence; there is no arbitrary topic-publish, real-robot write, or e-stop-release capability.
 - SolidWorks files are registered in inventories but not parsed (commercial software); FreeCAD deep integration is optional.
 - RLDS export produces a manifest skeleton (full TFDS export requires tensorflow); LeRobot export uses parquet when pyarrow is present, CSV otherwise.
+- Literature search and dataset discovery are best-effort network calls: when the API is unreachable they return a structured `backend: "unavailable"` result instead of fabricating papers or datasets.
+- Training tools are workflow scaffolding: the generated training script is a deterministic template placeholder (not real model code), remote submission requires an explicitly configured server plus your confirmation, and only allowlisted commands run remotely.
 
 ## 🌊 Future vision
 

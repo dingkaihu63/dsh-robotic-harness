@@ -44,6 +44,15 @@
 - 从 git 安装 bundle 时，pnpm 会要求显式授权 `prepare` 脚本 —— 只对源码可信的包授权，并锁定 commit。
 - 若未来接入 MCP Server，其输出仍须经过 RH Tool Policy，不信任第三方服务器。
 
+## 6.5 远程训练（training 模块）的安全不变式
+
+- **服务器必须显式配置**：`<storeRoot>/train-servers.json` 里的 `{"servers": [{"id","host","user","keyPath?","port?","workDir?"}]}` 是唯一信任来源；未配置时工具返回 `backend:"unavailable"`，绝不猜测主机。
+- **默认只准备，不执行**：`train-job-prepare` 默认 dry-run，只在本地生成 `train.py` / `launcher.sh` / 计划快照。远程提交要求**同一次调用**同时满足 `dryRun:false` 与 `confirm:true`，且服务器可达。
+- **命令白名单化**：远程只执行本工具生成的启动器（在配置的 workDir 内），只上传本工具生成的产物；不存在自由形式的远程命令执行。
+- **脚本是模板占位**：生成的训练脚本是确定性的占位模板，不是真实模型训练代码；Agent 必须如实说明，不得暗示"正在训练真实模型"。
+- **文献/数据集是证据不是结论**：`literature-search` 的结果带来源 URL，可能来自尽力而为的网络调用（失败时如实返回 unavailable）；`train-data-discovery` 命中的数据集未经人工校验，使用前必须检查许可与质量。
+- **报告不是发布依据**：`train-report` 只做日志统计（收敛判断），发布模型需要验证集与真实场景评估。
+
 ## 7. 报告义务
 
 自动生成的报告/诊断必须：
