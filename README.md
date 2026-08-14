@@ -173,6 +173,8 @@ dsh plugin --profile rh-demo add ./packages/dsh-bundle
 dsh --profile rh-demo --port 3080
 ```
 
+**Alternatives**: the bundle can also be installed from a **tarball** (`dsh plugin add ./robotic-harness-dsh-bundle-0.1.0.tgz`), from **git** (`dsh plugin add github:dingkaihu63/dsh-robotic-harness`), or from **npm** once published. Packaging/publishing steps and checks live in [docs/publishing.md](docs/publishing.md).
+
 Then just ask the Agent:
 
 > “Run the Robotic Harness pick-place demo: inspect the demo arm, run one clean simulation and one fault-injected simulation, diagnose the failure, export the evidence bundle and generate the report.”

@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-worker:
+    name: Python worker tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install worker + extras
+        run: pip install -e ".[all]" pytest
+
+      - name: Run test suite (per-file isolation)
+        run: python run_tests.py
+
+  bundle:
+    name: Bundle build & smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --filter @robotic-harness/dsh-bundle typecheck
+
+      - name: Build
+        run: pnpm --filter @robotic-harness/dsh-bundle build
+
+      - name: Worker copy is in sync
+        run: |
+          node scripts/sync-worker.mjs
+          git diff --exit-code -- packages/dsh-bundle/worker packages/dsh-bundle/fixtures packages/dsh-bundle/scenarios
+
+      - name: Bundle → worker smoke test
+        run: node scripts/smoke-worker.mjs
+        env:
+          PYTHON: python
+
+      - name: Pack tarball (publish path stays green)
+        run: pnpm --filter @robotic-harness/dsh-bundle pack --pack-destination ./dist-tarball
+      - name: Tarball contains the patch layer and worker
+        run: |
+          tar -tf dist-tarball/robotic-harness-dsh-bundle-*.tgz | grep -q "package/cordis.patch.yml"
+          tar -tf dist-tarball/robotic-harness-dsh-bundle-*.tgz | grep -q "package/worker/robotic_harness_worker/cli.py"
+          tar -tf dist-tarball/robotic-harness-dsh-bundle-*.tgz | grep -q "package/lib/tools.js"
+
+  demo:
+    name: End-to-end demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install worker extras
+        working-directory: python
+        run: pip install -e ".[all]"
+
+      - name: Run one-command demo (headless)
+        run: node scripts/demo.mjs
+        env:
+          PYTHON: python
+          MUJOCO_GL: osmesa
+
+      - name: Verify demo artifacts
+        run: |
+          test -f examples/demo-output/dashboard.html
+          test -n "$(ls examples/demo-output/report-run-*.md 2>/dev/null | head -1)"
+          test -n "$(ls examples/demo-output/bundle-run-*/manifest.json 2>/dev/null | head -1)"

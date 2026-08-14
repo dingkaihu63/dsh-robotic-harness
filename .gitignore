@@ -23,6 +23,7 @@ examples/demo-output/
 .npm-cache/
 .pip-cache/
 .tools/
+dist-tarball/
 
 # OS
 Thumbs.db
