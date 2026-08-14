@@ -856,7 +856,8 @@ const TOOL_SPECS: ToolSpec[] = [
       operations: {
         type: 'array',
         required: true,
-        description: 'Operations [{kind, ...}] — see tool docs',
+        description:
+          'Operations [{kind, params}] — params holds the operation arguments, e.g. {kind: "range-filter", params: {column: "q0", min: 0, max: 3}}; kinds: range-filter, dedupe, sort, interpolate-gaps, lowpass, median, resample, detrend, unit-convert, round',
         items: { type: 'object', additionalProperties: true },
       },
       outPath: { type: 'string', required: true, description: 'Output file (never the input)' },

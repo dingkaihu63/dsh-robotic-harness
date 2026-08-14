@@ -537,10 +537,15 @@ def convert_urdf_to_mjcf(urdf_path: str, out_path: str) -> dict[str, Any]:
         model = mujoco.MjModel.from_xml_path(urdf_path)
     warnings = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
 
-    mjcf_xml = model.get_xml()
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as handle:
-        handle.write(mjcf_xml)
+    if hasattr(model, "get_xml"):
+        mjcf_xml = model.get_xml()
+        with open(out_path, "w", encoding="utf-8") as handle:
+            handle.write(mjcf_xml)
+    else:
+        # MuJoCo >= 3.x removed MjModel.get_xml(); mj_saveLastXML writes the
+        # XML the model was compiled from.
+        mujoco.mj_saveLastXML(out_path, model)
 
     return {
         "ok": True,

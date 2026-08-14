@@ -149,6 +149,23 @@ def test_data_quality_missing_time_column(tmp_path):
     assert result["issues"][0]["code"] == "format.invalid"
 
 
+def test_convert_urdf_to_mjcf_output_reloads():
+    mujoco = pytest.importorskip("mujoco")
+    import tempfile
+
+    from robotic_harness_worker.assets import convert_urdf_to_mjcf
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "converted.mjcf")
+        report = convert_urdf_to_mjcf(GOOD_URDF, out)
+        assert report["ok"] is True
+        assert os.path.exists(out)
+        # the produced MJCF must be loadable by MuJoCo
+        model = mujoco.MjModel.from_xml_path(out)
+        assert model.nbody >= 1
+        assert model.njnt >= 1
+
+
 def test_capability_list_shape():
     from robotic_harness_worker import WORKER_CAPABILITIES
 
