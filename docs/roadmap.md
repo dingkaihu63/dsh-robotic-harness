@@ -45,7 +45,3 @@
 
 - 新 Capability adapter、Skill、Scenario、Failure Case、数据 importer/exporter、可视化面板、文档翻译、DSH 兼容测试。
 - 见 CONTRIBUTING.md；每个独立模块可单独发布与使用，不必等待"大平台"。
-
-## 长期方向
-
-- 若插件边界不足（经真实使用证据证明），再讨论派生发行版或与 OpenRAL 的 manifest/diagnostics 互操作实验；当前不提前选择。
