@@ -167,8 +167,9 @@ dsh plugin --profile rh-demo add ./packages/dsh-bundle
 # 3) 在 profile 的 cordis.patch.yml 中把 rh-tools.pythonPath 指向你的
 #    Python 3.10 解释器（patch 会整体替换 config，需重述全部键）
 
-# 4) 启动 Web UI
-dsh --profile rh-demo --port 3080
+# 4) 启动 Web UI（端口任选空闲端口；用 3090 避免与 DSH 默认端口 3080
+#    或其他应用冲突）
+dsh --profile rh-demo --port 3090
 ```
 
 然后直接对 Agent 说：

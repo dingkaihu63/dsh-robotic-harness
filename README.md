@@ -169,8 +169,9 @@ dsh plugin --profile rh-demo add ./packages/dsh-bundle
 #    profile's cordis.patch.yml (a patch replaces the whole row config,
 #    so restate every key)
 
-# 4) start the Web UI
-dsh --profile rh-demo --port 3080
+# 4) start the Web UI (pick any free port; 3090 is used here so it never
+#    clashes with the default DSH web port 3080 or with other apps)
+dsh --profile rh-demo --port 3090
 ```
 
 **Alternatives**: the bundle can also be installed from a **tarball** (`dsh plugin add ./robotic-harness-dsh-bundle-0.1.0.tgz`), from **git** (`dsh plugin add github:dingkaihu63/dsh-robotic-harness`), or from **npm** once published. Packaging/publishing steps and checks live in [docs/publishing.md](docs/publishing.md).
