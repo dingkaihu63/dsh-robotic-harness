@@ -1115,6 +1115,32 @@ const TOOL_SPECS: ToolSpec[] = [
       query: { type: 'string', required: true, description: 'Search query' },
     },
   },
+  {
+    name: 'rh_memory_retrieve',
+    description:
+      'Project memory: retrieve the historical diagnostic cases most similar to a run (by runPath) or to a symptom/anomalyKinds query. Keyword/anomaly-based scoring with rationale for every match — use the rationale and evidence to weigh each case; this is not semantic search.',
+    command: 'memory-retrieve',
+    parameters: {
+      runPath: { type: 'string', description: 'Run directory or run.json (symptom + anomalies derived)' },
+      symptom: { type: 'string', description: 'Explicit symptom text (alternative to runPath)' },
+      anomalyKinds: { type: 'array', description: 'Anomaly kinds to match (e.g. grasp_missed, gripper_slip)', items: { type: 'string' } },
+      limit: { type: 'number', description: 'Max results; default 5' },
+      minScore: { type: 'number', description: 'Minimum score; default 0' },
+      excludeRunId: { type: 'string', description: 'Exclude cases from this run' },
+    },
+  },
+  {
+    name: 'rh_memory_ingest',
+    description:
+      'Record a human verdict on a diagnostic case (status verified/rejected/closed/open + conclusion). Only a human may verify a diagnosis; verified cases rank first in memory-retrieve.',
+    command: 'memory-ingest',
+    parameters: {
+      caseId: { type: 'string', required: true, description: 'Diagnostic case id' },
+      status: { type: 'string', description: 'verified | rejected | closed | open' },
+      conclusion: { type: 'string', description: 'Human conclusion text' },
+      operator: { type: 'string', description: 'Operator identifier' },
+    },
+  },
 
   // --- reports & dashboard --------------------------------------------------
   {

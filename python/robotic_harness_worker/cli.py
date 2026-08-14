@@ -203,6 +203,7 @@ def cmd_sim_run(args: dict[str, Any]) -> dict[str, Any]:
 
 def cmd_diagnose_run(args: dict[str, Any]) -> dict[str, Any]:
     from .diagnostics import diagnose, load_run_data
+    from .memory import cmd_memory_retrieve
 
     run_path = args.get("runPath") or args.get("runDir")
     if not run_path:
@@ -211,6 +212,18 @@ def cmd_diagnose_run(args: dict[str, Any]) -> dict[str, Any]:
     case = diagnose(run, telemetry)
     store = _store_for(args)
     case_path = store.save_case(case)
+
+    # Project memory: attach the most similar historical cases so the model
+    # reasons with prior evidence (scores and rationale included).
+    related: list[dict[str, Any]] = []
+    try:
+        memory = cmd_memory_retrieve(
+            {"runPath": run_path, "limit": 3, "excludeRunId": run.id, "storeRoot": store.root}
+        )
+        related = memory.get("related", [])
+    except Exception as error:  # noqa: BLE001 - memory must never break diagnosis
+        related = [{"error": f"memory retrieval failed: {error}"}]
+
     return {
         "ok": True,
         "caseId": case.id,
@@ -218,6 +231,7 @@ def cmd_diagnose_run(args: dict[str, Any]) -> dict[str, Any]:
         "symptom": case.symptom,
         "findings": [f.to_dict() for f in case.findings],
         "hypotheses": [h.to_dict() for h in case.hypotheses],
+        "relatedCases": related,
         "casePath": case_path,
     }
 
@@ -405,6 +419,7 @@ _DOMAIN_MODULES = [
     "experiment",
     "cad",
     "knowledge",
+    "memory",
     "robots",
 ]
 

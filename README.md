@@ -198,7 +198,7 @@ The Agent will drive the `rh_*` tools step by step and keep every result as evid
 | Telemetry | `rh_telemetry_channels` · `rh_telemetry_window` · `rh_anomaly_scan` · `rh_failure_evidence_collect` · `rh_run_compare` · `rh_diagnose_run` · `rh_timeline_export` |
 | Data | `rh_data_inventory` · `rh_data_time_sync_estimate` · `rh_data_align_streams` · `rh_data_transform_apply` · `rh_data_split_create` · `rh_data_leakage_check` · `rh_data_deidentify` · `rh_data_convert_rosbag` · `rh_data_export_lerobot` · `rh_dataset_version_create` · `rh_dataset_card_generate` |
 | Experiment | `rh_experiment_spec_create` · `rh_experiment_matrix_expand` · `rh_benchmark_start` · `rh_metrics_compute` · `rh_ablation_compare` · `rh_benchmark_report` |
-| Knowledge | `rh_docs_index` · `rh_manual_search` · `rh_error_code_lookup` · `rh_case_search` |
+| Knowledge & memory | `rh_docs_index` · `rh_manual_search` · `rh_error_code_lookup` · `rh_case_search` · `rh_memory_retrieve` · `rh_memory_ingest` |
 | Reports | `rh_evidence_export` · `rh_report_generate` · `rh_dashboard_generate` |
 
 ### Implementation status

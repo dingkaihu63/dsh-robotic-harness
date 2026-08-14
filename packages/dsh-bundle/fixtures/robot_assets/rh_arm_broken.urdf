@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!--
+  Deliberately broken URDF for validation tests: duplicate link name,
+  zero/negative mass, zero inertia matrix, missing limits, missing inertial.
+-->
+<robot name="rh_arm_broken">
+  <link name="base_link">
+    <visual>
+      <geometry><cylinder length="0.1" radius="0.03"/></geometry>
+    </visual>
+    <collision>
+      <geometry><cylinder length="0.1" radius="0.03"/></geometry>
+    </collision>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <geometry><box size="0.06 0.06 0.2"/></geometry>
+    </visual>
+    <inertial>
+      <origin xyz="0.1 0 0" rpy="0 0 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+
+  <!-- duplicate name -->
+  <link name="link1">
+    <visual>
+      <geometry><box size="0.06 0.06 0.2"/></geometry>
+    </visual>
+    <inertial>
+      <origin xyz="0.1 0 0" rpy="0 0 0"/>
+      <mass value="-0.5"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0004"/>
+    </inertial>
+  </link>
+
+  <joint name="fixed_base" type="fixed">
+    <parent link="base_link"/>
+    <child link="link1"/>
+  </joint>
+
+  <!-- revolute joint without limits -->
+  <joint name="bad_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+  </joint>
+</robot>

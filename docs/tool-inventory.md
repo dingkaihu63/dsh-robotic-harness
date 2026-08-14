@@ -147,7 +147,7 @@
 | rh_ablation_compare | ablation-compare | R0 | 消融对比 |
 | rh_benchmark_report | benchmark-report | R1 | 实验报告 |
 
-## 知识检索（knowledge）
+## 知识检索（knowledge / memory）
 
 | DSH 工具 | Worker 命令 | 风险 | 说明 |
 |---|---|---|---|
@@ -155,6 +155,8 @@
 | rh_manual_search | manual-search | R0 | 手册检索 |
 | rh_error_code_lookup | error-code-lookup | R0 | 错误码查询 |
 | rh_case_search | case-search | R0 | 案例检索 |
+| rh_memory_retrieve | memory-retrieve | R0 | 项目记忆：按 run/症状检索最相似历史案例（关键词+异常类型打分，附依据） |
+| rh_memory_ingest | memory-ingest | R1 | 记录人工结论；verified 案例在检索中优先 |
 
 ## 报告与面板
 

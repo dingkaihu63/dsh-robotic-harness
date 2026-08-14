@@ -52,6 +52,7 @@ Robotic Harness 是 DeepSeek Harness 的**下游插件套件**：不复制或修
 | data_pipeline.py | 17 | 清单/同步/对齐/转换/切分/去标识化/rosbag/LeRobot/版本（§14） |
 | experiment.py | 6 | spec/矩阵/基准/指标/消融/报告（§15） |
 | knowledge.py | 4 | 文档索引/检索/错误码/案例（§16） |
+| memory.py | 2 | 项目记忆：相似历史案例检索（关键词+异常类型打分，附依据）与人工结论记录；`diagnose-run` 自动附带 relatedCases |
 | report.py | 4+ | 证据包/报告/时间线/仪表盘/回放 |
 
 **硬件/后端依赖模块的诚实降级**：`ros2` CLI、SolidWorks、真机适配器、重型模型缺失时，
