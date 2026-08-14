@@ -272,6 +272,7 @@ def test_ros_diagnostics_snapshot_rosbag_branch(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name != "nt", reason="C:-drive guard is Windows-only")
 def test_rosbag_start_rejects_c_drive():
     with pytest.raises(WorkerError, match="C:"):
         ros.cmd_rosbag_start({"bagPath": "C:\\tmp\\rosbag"})

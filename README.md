@@ -222,7 +222,7 @@ The full plan's tool/skill surface is implemented as **demo-grade adapters**:
 > Stated honestly, so testers are never surprised.
 
 - The suction grasp is a **kinematic implementation** (the object follows the cup while attached) — noted in run configs and reports.
-- Perception uses real offscreen rendering when the renderer is available; otherwise it degrades to ground-truth + noise simulation (recorded in telemetry). If OpenCV crashes natively (e.g., DLL conflicts in exotic environments), perception degrades to the same fallback instead of failing the run.
+- Perception uses real offscreen rendering when the renderer is available; otherwise it degrades to ground-truth + noise simulation (recorded in telemetry). If OpenCV crashes natively (e.g., DLL conflicts in exotic environments), perception degrades to the same fallback instead of failing the run. Headless Linux needs a software GL (`sudo apt install libosmesa6 libgl1` + `MUJOCO_GL=osmesa`) for offscreen rendering; the CI runs this way.
 - Live ROS 2 tools require the `ros2` CLI; without it they return a structured `backend: "unavailable"` diagnostic. rosbag2 inspection/conversion works without ROS.
 - Real-robot tools are a state machine + preflight only: hardware items are reported as `skip` (never faked) until a hardware adapter exists. Simulation results are not real-robot evidence; there is no arbitrary topic-publish, real-robot write, or e-stop-release capability.
 - SolidWorks files are registered in inventories but not parsed (commercial software); FreeCAD deep integration is optional.

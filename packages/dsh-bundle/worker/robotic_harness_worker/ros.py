@@ -1306,6 +1306,9 @@ def cmd_rosbag_stop(args: dict[str, Any]) -> dict[str, Any]:
             else:
                 os.kill(int(pid), signal.SIGTERM)
                 stopped = True
+        except ProcessLookupError:
+            # the process is already gone; the job is still considered stopped
+            stopped = True
         except Exception:  # noqa: BLE001 - process may already be gone
             stopped = False
     remaining = [job for job in jobs if job.get("jobId") != job_id]

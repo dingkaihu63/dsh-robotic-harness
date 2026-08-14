@@ -548,6 +548,7 @@ def test_deidentify_requires_outdir_for_face_blur(tmp_path):
         dp.cmd_data_deidentify({"inputPath": str(in_dir), "operations": ["face-blur"]})
 
 
+@pytest.mark.skipif(os.name != "nt", reason="C:-drive guard is Windows-only")
 def test_deidentify_rejects_c_drive_outdir(tmp_path):
     text_path = tmp_path / "x.txt"
     text_path.write_text("hello", encoding="utf-8")

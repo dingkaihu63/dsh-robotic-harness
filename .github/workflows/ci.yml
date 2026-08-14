@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install headless GL (MuJoCo offscreen rendering)
+        run: sudo apt-get update && sudo apt-get install -y libosmesa6 libgl1 libglib2.0-0
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -25,6 +28,8 @@ jobs:
 
       - name: Run test suite (per-file isolation)
         run: python run_tests.py
+        env:
+          MUJOCO_GL: osmesa
 
   bundle:
     name: Bundle build & smoke
@@ -73,6 +78,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install headless GL (MuJoCo offscreen rendering)
+        run: sudo apt-get update && sudo apt-get install -y libosmesa6 libgl1 libglib2.0-0
 
       - uses: actions/setup-python@v5
         with:

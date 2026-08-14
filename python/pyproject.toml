@@ -15,6 +15,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 simulation = ["mujoco>=3.0", "numpy>=1.26"]
