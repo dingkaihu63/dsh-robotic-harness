@@ -235,6 +235,8 @@ Robotic Harness 目前只是一个人能力、资源有限的尝试。它还很�
 
 > **正因有涓涓细流，才铸就了大江大河。**
 
+**Every contribution is welcome. —— 每一份贡献都受欢迎。** 🌊
+
 ## 📂 仓库结构
 
 ```text

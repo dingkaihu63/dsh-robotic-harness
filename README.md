@@ -237,6 +237,8 @@ The destination we hope for is not "one person's plugin", but an **open platform
 
 > *正因有涓涓细流，才铸就了大江大河。* — every great river begins as trickling streams; open source is how those streams find each other.
 
+**Every contribution is welcome.** 🌊
+
 ## 📂 Repository layout
 
 ```text
