@@ -32,6 +32,7 @@ from CAD/URDF inspection to MuJoCo pick-and-place, fault injection, evidence-bas
 - [🧩 Tool & skill surface](#-tool--skill-surface)
 - [🎯 The demo (MuJoCo pick-and-place)](#-the-demo-mujoco-pick-and-place)
 - [⚠️ Known limitations](#️-known-limitations)
+- [🌊 Future vision](#-future-vision)
 - [📂 Repository layout](#-repository-layout)
 - [📚 Documentation](#-documentation)
 - [🤝 Contributing](#-contributing)
@@ -223,6 +224,18 @@ The full plan's tool/skill surface is implemented as **demo-grade adapters**:
 - Real-robot tools are a state machine + preflight only: hardware items are reported as `skip` (never faked) until a hardware adapter exists. Simulation results are not real-robot evidence; there is no arbitrary topic-publish, real-robot write, or e-stop-release capability.
 - SolidWorks files are registered in inventories but not parsed (commercial software); FreeCAD deep integration is optional.
 - RLDS export produces a manifest skeleton (full TFDS export requires tensorflow); LeRobot export uses parquet when pyarrow is present, CSV otherwise.
+
+## 🌊 Future vision
+
+Robotic Harness is, for now, an attempt built with one person's limited time and resources. It is rough around the edges, many modules still await validation in real environments, and it surely hides bugs. That is exactly why **community participation matters more than anything else**:
+
+- **Use it** — real usage is the best testing and the most convincing evidence for what to build next;
+- **Fix it** — report bugs, tighten edge cases, correct the docs; every fix makes the path smoother for the next person;
+- **Extend it** — new Skills, scenarios, failure cases, data adapters, ROS 2 live validation, new domains;
+
+The destination we hope for is not "one person's plugin", but an **open platform raised on the open-source DeepSeek Harness foundation, shaped by generations of community contribution, that fits robotics and embodied-intelligence development better** — where the model orchestrates, specialized capabilities each do their own job, every experiment keeps full evidence, and every contribution is recorded and reused.
+
+> *正因有涓涓细流，才铸就了大江大河。* — every great river begins as trickling streams; open source is how those streams find each other.
 
 ## 📂 Repository layout
 
