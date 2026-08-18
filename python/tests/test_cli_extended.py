@@ -41,7 +41,9 @@ def test_sdf_validate(tmp_path):
 
 
 def test_sim_fault_inject(tmp_path):
-    store = RunStore(str(tmp_path / "store"))
+    # storeRoot convention (core.normalize_store_root): the RunStore root is
+    # <workspace>/.rh — a raw non-.rh path is treated as a workspace root
+    store = RunStore(str(tmp_path / "store" / ".rh"))
     result = _run_command(
         "sim-fault-inject",
         {"fault": {"gripper_slip": True}, "seed": 7},
@@ -87,7 +89,7 @@ def test_sim_real_gap_report(tmp_path):
 
 
 def test_sim_batch_benchmark(tmp_path):
-    store = RunStore(str(tmp_path / "store"))
+    store = RunStore(str(tmp_path / "store" / ".rh"))
     cells = [
         {"label": "clean", "seed": 42, "fault": {}},
         {"label": "slip", "seed": 43, "fault": {"gripper_slip": True}},
@@ -101,7 +103,7 @@ def test_sim_batch_benchmark(tmp_path):
 
 
 def test_dashboard_generate(tmp_path):
-    store = RunStore(str(tmp_path / "store"))
+    store = RunStore(str(tmp_path / "store" / ".rh"))
     run, _ = run_pick_place(SCENARIO_PICK_PLACE, {}, seed=10, store=store)
     out = tmp_path / "dashboard.html"
     result = _run_command("dashboard-generate", {"outPath": str(out)}, store.root)

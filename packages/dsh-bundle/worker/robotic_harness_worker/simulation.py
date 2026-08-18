@@ -78,6 +78,22 @@ DEFAULT_FAULT: dict[str, Any] = {
     "occlusion": False,
 }
 
+# The rh_sim_run / rh_sim_fault_inject tool schemas document camelCase fault
+# keys; the runner reads snake_case. Normalize so documented keys actually
+# take effect (previously a model following the docs silently ran clean).
+_FAULT_KEY_MAP: dict[str, str] = {
+    "perceptionOffsetPx": "perception_offset_px",
+    "gripperSlip": "gripper_slip",
+    "tfOffset": "tf_offset",
+    "sensorNoise": "sensor_noise",
+    "modelTimeoutS": "model_timeout_s",
+    "occlusion": "occlusion",
+}
+
+
+def _normalize_fault_keys(fault: dict[str, Any]) -> dict[str, Any]:
+    return {_FAULT_KEY_MAP.get(key, key): value for key, value in (fault or {}).items()}
+
 
 def validate_scenario(config: dict[str, Any]) -> dict[str, Any]:
     """Validate a scenario config; returns ``{ok, issues, resolved}``."""
@@ -429,10 +445,15 @@ class PickPlaceRunner:
     def __init__(self, scenario: dict[str, Any], fault: dict[str, Any], seed: int) -> None:
         self.scenario = scenario
         merged_fault = json.loads(json.dumps(DEFAULT_FAULT))
-        merged_fault.update(fault or {})
+        merged_fault.update(_normalize_fault_keys(fault))
         self.fault = merged_fault
         self.seed = seed
         self.rng = random.Random(seed)
+        # Per-source RNG streams: which stream consumes how many draws must not
+        # depend on renderer availability, or the same seed would not
+        # reproduce the same run across machines (see _perceive / _telemetry).
+        self.rng_perception = random.Random(f"{seed}:perception")
+        self.rng_sensor = random.Random(f"{seed}:sensor")
         self.env = PickPlaceEnv(scenario)
         self.arm = self.env.arm
         self.telemetry: list[dict[str, Any]] = []
@@ -457,7 +478,7 @@ class PickPlaceRunner:
         q = self.env.qpos()
         measured = q
         if noisy and self.fault.get("sensor_noise", 0.0) > 0:
-            measured = [value + self.rng.gauss(0.0, self.fault["sensor_noise"]) for value in q]
+            measured = [value + self.rng_sensor.gauss(0.0, self.fault["sensor_noise"]) for value in q]
         tracking = [abs(target - actual) for target, actual in zip(q_target, measured)]
         self.telemetry.append(
             {
@@ -537,7 +558,7 @@ class PickPlaceRunner:
             decision = vision.route_perception(
                 image,
                 scene=self.scenario,
-                rng=self.rng,
+                rng=self.rng_perception,
                 perception="auto",
                 color=self.scenario["object"]["color"],
                 fault=self.fault,
@@ -548,15 +569,22 @@ class PickPlaceRunner:
                 estimate = self.env.camera.world_from_px(px, py, est_true[2])
                 estimate[1] = est_true[1]  # y is fixed by the plane assumption
             else:
-                estimate = est_true.copy()
+                # Degraded estimate: fall back to the scenario prior plus
+                # worst-case jitter. Using the true position here would cancel
+                # the injected perception fault and let the run "succeed" on
+                # perfect truth — corrupting fault-injection benchmarks.
+                estimate = np.array(self.scenario["object"]["initXyz"], dtype=float)
+                estimate[0] += self.rng_perception.uniform(-0.06, 0.06)
+                estimate[2] += self.rng_perception.uniform(-0.06, 0.06)
+                estimate[1] = est_true[1]
         else:
             # Simulated perception: ground truth pixel + noise + offset fault.
             try:
                 px, py = self.env.camera.px_from_world(est_true)
             except ValueError:
                 px, py = self.env.camera.width / 2, self.env.camera.height / 2
-            px += self.fault.get("perception_offset_px", [0.0, 0.0])[0] + self.rng.uniform(-2, 2)
-            py += self.fault.get("perception_offset_px", [0.0, 0.0])[1] + self.rng.uniform(-2, 2)
+            px += self.fault.get("perception_offset_px", [0.0, 0.0])[0] + self.rng_perception.uniform(-2, 2)
+            py += self.fault.get("perception_offset_px", [0.0, 0.0])[1] + self.rng_perception.uniform(-2, 2)
             estimate = self.env.camera.world_from_px(px, py, est_true[2])
             estimate[1] = est_true[1]
             perception_record = {
@@ -631,8 +659,13 @@ class PickPlaceRunner:
             approach = wrist_grasp - axis * 0.12
             lift_high = wrist_grasp + np.array([0.0, 0.0, 0.22])
             target_center = np.array(scenario["targetZone"]["center"], dtype=float)
+            # Place pose: the released object's CENTER lands at
+            # target_center[2] + object_size + face_gap, i.e. its bottom face
+            # rests on the table top (target_center[2]) — the old formula left
+            # the tip one half-object too low and drove the object into the
+            # table during the place phase.
             target_wrist = np.array(
-                [target_center[0], 0.0, target_center[2] + object_size + face_gap + arm.cup_reach]
+                [target_center[0], 0.0, target_center[2] + 2 * object_size + face_gap + arm.cup_reach]
             )
             target_high = target_wrist + np.array([0.0, 0.0, 0.22])
 
@@ -688,8 +721,9 @@ class PickPlaceRunner:
                         objPos=[round(float(v), 4) for v in env.object_pos()],
                     )
                     self._phase("lift", outcome="failed", detail="gripper slip injected")
-                    # let the object fall back to the table
-                    for _ in range(120):
+                    # let the object fall back to the table (bounded by the step budget)
+                    fall_steps = min(120, max(0, int(self.sim["maxSteps"] - env.data.time / self.sim["dt"])))
+                    for _ in range(fall_steps):
                         env.step()
                 else:
                     self._add_anomaly(
@@ -717,7 +751,8 @@ class PickPlaceRunner:
                 self.suction = False
                 self.attached = False
                 self._add_anomaly("suction_released", "suction released at the target zone")
-                for _ in range(60):
+                settle_steps = min(60, max(0, int(self.sim["maxSteps"] - env.data.time / self.sim["dt"])))
+                for _ in range(settle_steps):
                     env.step()
 
             # --- retract --------------------------------------------------------------
@@ -746,8 +781,11 @@ class PickPlaceRunner:
         scenario = self.scenario
         obj_final = env.object_pos()
         target = np.array(scenario["targetZone"]["center"], dtype=float)
-        target[2] += 0.0
-        in_zone = math.hypot(obj_final[0] - target[0], obj_final[2] - target[2]) <= scenario["targetZone"]["radius"] + 0.01
+        # Compare the object's BASE (center minus half-size) against the zone
+        # center: the zone sits at table-top level, so comparing the center z
+        # would consume ~one object height of the radius budget vertically.
+        obj_base = np.array([obj_final[0], obj_final[2] - scenario["object"]["size"]], dtype=float)
+        in_zone = math.hypot(obj_base[0] - target[0], obj_base[1] - target[2]) <= scenario["targetZone"]["radius"] + 0.01
         # object must have been grasped and the run must not have been aborted
         grasped = any(a.kind == "suction_engaged" for a in self.anomalies)
         slipped = any(a.kind == "gripper_slip" for a in self.anomalies)
@@ -908,7 +946,8 @@ def sim_batch_benchmark(
     results: list[dict[str, Any]] = []
     for index, cell in enumerate(cells):
         scenario_config = cell.get("scenario") or json.loads(json.dumps(SCENARIO_PICK_PLACE))
-        seed = int(cell.get("seed", 42 + index))
+        cell_seed = cell.get("seed")
+        seed = int(cell_seed) if cell_seed is not None else 42 + index
         run, _ = run_pick_place(scenario_config, cell.get("fault", {}), seed, store=store)
         label = cell.get("label") or f"cell-{index}"
         results.append(

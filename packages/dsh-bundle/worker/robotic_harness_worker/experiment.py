@@ -28,6 +28,7 @@ spec) or ``{"spec": {...}}`` (use the spec directly, no disk write).
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Any, Optional
@@ -292,7 +293,15 @@ def _run_success(run: dict[str, Any]) -> bool:
     value = run.get("success")
     if value is None:
         value = (run.get("metrics") or {}).get("success")
-    return bool(value)
+    # strict: NaN counts as missing, not as success; only real booleans and
+    # 1/1.0 count as success
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not (isinstance(value, float) and math.isnan(value)):
+        return value in (1, 1.0)
+    return False
 
 
 def _run_variables(run: dict[str, Any]) -> dict[str, Any]:
@@ -301,7 +310,15 @@ def _run_variables(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _value_key(value: Any) -> tuple[str, Any]:
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    # Python equality merges True == 1 == 1.0 — tag the type so bool/int/float
+    # levels do not silently collapse into one group
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, (str,)) or value is None:
         return ("scalar", value)
     return ("json", json.dumps(value, ensure_ascii=False, sort_keys=True))
 
@@ -422,6 +439,7 @@ def ablation_compare(
 
     order = list(groups)
     baseline_key = None
+    baseline_warning: Optional[str] = None
     if baseline_value is not None:
         target = _value_key(baseline_value)
         for key in order:
@@ -430,6 +448,10 @@ def ablation_compare(
                 break
     if baseline_key is None:
         baseline_key = order[0]
+        if baseline_value is not None:
+            baseline_warning = (
+                f"请求的 baseline 值 {baseline_value!r} 不在数据中；已改用 {groups[baseline_key]['value']!r} 作为基准"
+            )
 
     group_stats = [
         {
@@ -454,8 +476,35 @@ def ablation_compare(
     else:
         direction = "no-effect"
 
+    # per-level contrasts vs the baseline: the old code pooled ALL non-baseline
+    # levels into one rate, so with >2 levels the verdict mixed unrelated
+    # alternatives. No significance test is attempted (no variance/CI here).
+    level_effects: list[dict[str, Any]] = []
+    for key in order:
+        if key == baseline_key:
+            continue
+        level_rate = float(np.mean(groups[key]["successes"]))
+        level_delta = level_rate - rate_a
+        if level_delta > 0.001:
+            level_direction = "improves"
+        elif level_delta < -0.001:
+            level_direction = "hurts"
+        else:
+            level_direction = "no-effect"
+        level_effects.append(
+            {
+                "level": groups[key]["value"],
+                "successRate": round(level_rate, 3),
+                "runs": groups[key]["runs"],
+                "delta": round(level_delta, 3),
+                "direction": level_direction,
+                "significance": None,
+            }
+        )
+
     return {
         "baseline": baseline,
+        "baselineWarning": baseline_warning,
         "groups": group_stats,
         "effect": {
             "ablatedVariable": ablated_variable,
@@ -463,6 +512,8 @@ def ablation_compare(
                 f"移除/改变 {ablated_variable} 使成功率从 {rate_a:.3f} 变为 {rate_b:.3f}（Δ={delta:+.3f}）"
             ),
             "direction": direction,
+            "levels": level_effects,
+            "caveat": "未做显著性检验（无方差/CI 信息）；逐水平对比仅供参考，结论需人工统计复核",
         },
         "note": "相关性≠因果性，需人工确认",
     }

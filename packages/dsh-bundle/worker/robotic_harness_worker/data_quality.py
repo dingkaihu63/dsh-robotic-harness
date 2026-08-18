@@ -27,30 +27,44 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _median(values: list[float]) -> float:
+    """True median (averages the two middle elements for even-length input)."""
+    ordered = sorted(values)
+    n = len(ordered)
+    if n % 2 == 1:
+        return ordered[n // 2]
+    return (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0
+
+
 def audit_csv(path: str, time_column: str = "t", max_rows: int = 200_000) -> dict[str, Any]:
     """Audit a CSV file with a numeric time column."""
     rows_read = 0
     rows: list[dict[str, Any]] = []
     header: list[str] = []
     parse_errors = 0
-    with open(path, encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return _empty_report("csv", path, "file has no header row")
-        if not header:
-            return _empty_report("csv", path, "file has no header row")
-        if time_column not in header:
-            return _empty_report("csv", path, f"time column {time_column!r} not found in header {header}")
-        for line in reader:
-            if len(line) != len(header):
-                parse_errors += 1
-                continue
-            rows.append(dict(zip(header, line)))
-            rows_read += 1
-            if rows_read >= max_rows:
-                break
+    # utf-8-sig: a BOM in header[0] would otherwise make the time column
+    # "not found" even when it is present
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return _empty_report("csv", path, "file has no header row")
+            if not header:
+                return _empty_report("csv", path, "file has no header row")
+            if time_column not in header:
+                return _empty_report("csv", path, f"time column {time_column!r} not found in header {header}")
+            for line in reader:
+                if len(line) != len(header):
+                    parse_errors += 1
+                    continue
+                rows.append(dict(zip(header, line)))
+                rows_read += 1
+                if rows_read >= max_rows:
+                    break
+    except (OSError, UnicodeDecodeError) as error:
+        return _empty_report("csv", path, f"cannot read file: {error}")
     return _audit_rows("csv", path, header, rows, time_column, parse_errors)
 
 
@@ -59,25 +73,28 @@ def audit_jsonl(path: str, time_column: str = "t", max_rows: int = 200_000) -> d
     rows: list[dict[str, Any]] = []
     parse_errors = 0
     header: list[str] = []
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                parse_errors += 1
-                continue
-            if not isinstance(record, dict):
-                parse_errors += 1
-                continue
-            for key in record:
-                if key not in header:
-                    header.append(key)
-            rows.append(record)
-            if len(rows) >= max_rows:
-                break
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    parse_errors += 1
+                    continue
+                if not isinstance(record, dict):
+                    parse_errors += 1
+                    continue
+                for key in record:
+                    if key not in header:
+                        header.append(key)
+                rows.append(record)
+                if len(rows) >= max_rows:
+                    break
+    except (OSError, UnicodeDecodeError) as error:
+        return _empty_report("jsonl", path, f"cannot read file: {error}")
     if time_column not in header:
         return _empty_report("jsonl", path, f"time column {time_column!r} not found in records")
     return _audit_rows("jsonl", path, header, rows, time_column, parse_errors)
@@ -99,10 +116,17 @@ def _audit_rows(fmt: str, path: str, header: list[str], rows: list[dict[str, Any
     numeric_columns = [c for c in header if c != time_column]
     timestamps: list[float] = []
     ts_missing = 0
+    ts_non_finite = 0
     for row in rows:
         value = _safe_float(row.get(time_column))
         if value is None:
             ts_missing += 1
+            continue
+        if not math.isfinite(value):
+            # NaN/Inf timestamps are invisible to the ordering/gap checks and
+            # would serialize as a bare NaN token that breaks the caller's
+            # JSON.parse — count them explicitly instead
+            ts_non_finite += 1
             continue
         timestamps.append(value)
 
@@ -144,7 +168,10 @@ def _audit_rows(fmt: str, path: str, header: list[str], rows: list[dict[str, Any
             "min": round(min(values), 6) if values else None,
             "max": round(max(values), 6) if values else None,
             "mean": round(sum(values) / len(values), 6) if values else None,
-            "constant": len(set(round(v, 6) for v in values)) <= 1 if values else None,
+            # exact comparison: rounding to 6 decimals misclassified channels
+            # varying by < 1e-6 (e.g. 0.0 vs 1e-7) as constant
+            "constant": len(set(values)) <= 1 if values else None,
+            "std": None,
         }
         if len(values) > 1:
             variance = sum((v - stats["mean"]) ** 2 for v in values) / (len(values) - 1)
@@ -154,12 +181,14 @@ def _audit_rows(fmt: str, path: str, header: list[str], rows: list[dict[str, Any
     issues: list[dict[str, Any]] = []
     if ts_missing:
         issues.append({"severity": "warning", "code": "ts.missing", "message": f"{ts_missing} rows lack a numeric {time_column!r}"})
+    if ts_non_finite:
+        issues.append({"severity": "error", "code": "ts.non_finite", "message": f"{ts_non_finite} timestamps are NaN/Inf"})
     if duplicates:
         issues.append({"severity": "warning", "code": "ts.duplicates", "message": f"{duplicates} duplicate timestamps"})
     if out_of_order:
         issues.append({"severity": "error", "code": "ts.out_of_order", "message": f"{out_of_order} timestamp pairs are out of order"})
     if gaps:
-        median_gap = sorted(gaps)[len(gaps) // 2]
+        median_gap = _median(gaps)
         largest = max(gaps)
         if largest > median_gap * 5 + 0.1:
             issues.append(
@@ -184,9 +213,10 @@ def _audit_rows(fmt: str, path: str, header: list[str], rows: list[dict[str, Any
             "last": timestamps[-1] if timestamps else None,
             "count": len(timestamps),
             "missing": ts_missing,
+            "nonFinite": ts_non_finite,
             "duplicates": duplicates,
             "outOfOrder": out_of_order,
-            "medianIntervalS": round(sorted(gaps)[len(gaps) // 2], 6) if gaps else None,
+            "medianIntervalS": round(_median(gaps), 6) if gaps else None,
         },
         "channels": channel_stats,
         "issues": issues,

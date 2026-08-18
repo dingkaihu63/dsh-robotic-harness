@@ -152,6 +152,18 @@ def cmd_docs_index(args: dict[str, Any]) -> dict[str, Any]:
     if not os.path.isdir(path):
         raise WorkerError(f"docs path is not a directory: {path}")
     out_path = args.get("outPath") or _default_index_path()
+    # never clobber a real document: only a previously generated index
+    # ({"root": ..., "entries": [...]}) may be overwritten
+    if os.path.exists(out_path):
+        is_previous_index = False
+        try:
+            with open(out_path, encoding="utf-8") as handle:
+                existing = json.load(handle)
+            is_previous_index = isinstance(existing, dict) and "entries" in existing and "root" in existing
+        except (OSError, json.JSONDecodeError):
+            is_previous_index = False
+        if not is_previous_index:
+            raise WorkerError(f"refusing to overwrite existing non-index file: {out_path}")
     index = build_index(path, exclude=out_path)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -172,20 +184,46 @@ def cmd_docs_index(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _load_index_entries(index_path: str) -> list[dict[str, Any]]:
+def _load_index_entries(index_path: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Load persisted index entries; returns (fresh_entries, stale_paths).
+
+    Entries whose file changed since indexing (sha256 mismatch) are dropped:
+    serving stale postings whose snippets no longer contain the matched terms
+    would be misleading evidence.
+    """
     with open(index_path, encoding="utf-8") as handle:
         data = json.load(handle)
     entries = data.get("entries")
     if not isinstance(entries, list):
         raise WorkerError(f"invalid index file (no 'entries' list): {index_path}")
-    return entries
+    fresh: list[dict[str, Any]] = []
+    stale: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        expected = entry.get("sha256")
+        try:
+            if (
+                isinstance(path, str)
+                and isinstance(expected, str)
+                and os.path.exists(path)
+                and sha256_file(path) == expected
+            ):
+                fresh.append(entry)
+                continue
+        except OSError:
+            pass
+        if isinstance(path, str):
+            stale.append(path)
+    return fresh, stale
 
 
-def _resolve_index(path: Optional[str]) -> tuple[list[dict[str, Any]], str, bool]:
-    """Return (entries, index_ref, built_on_the_fly).
+def _resolve_index(path: Optional[str]) -> tuple[list[dict[str, Any]], str, bool, list[str]]:
+    """Return (entries, index_ref, built_on_the_fly, stale_paths).
 
     - ``path`` is a directory -> build the index on the fly (auto docs-index).
-    - ``path`` is a file -> load the persisted index.
+    - ``path`` is a file -> load the persisted index (stale entries dropped).
     - ``path`` is given but missing -> WorkerError.
     - ``path`` is None -> default ``.rh/docs-index.json``; if absent, auto-build
       from the current working directory and persist it.
@@ -193,22 +231,24 @@ def _resolve_index(path: Optional[str]) -> tuple[list[dict[str, Any]], str, bool
     if path:
         if os.path.isdir(path):
             index = build_index(path)
-            return index["entries"], index["root"], True
+            return index["entries"], index["root"], True, []
         if os.path.isfile(path):
-            return _load_index_entries(path), os.path.abspath(path), False
+            entries, stale = _load_index_entries(path)
+            return entries, os.path.abspath(path), False, stale
         raise WorkerError(f"index 路径不存在：{path}（请先运行 docs-index 生成索引）")
     default = _default_index_path()
     if os.path.isfile(default):
-        return _load_index_entries(default), os.path.abspath(default), False
+        entries, stale = _load_index_entries(default)
+        return entries, os.path.abspath(default), False, stale
     index = build_index(os.getcwd(), exclude=default)
     os.makedirs(os.path.dirname(default), exist_ok=True)
     with open(default, "w", encoding="utf-8") as handle:
         json.dump(index, handle, ensure_ascii=False, indent=2)
-    return index["entries"], os.path.abspath(default), True
+    return index["entries"], os.path.abspath(default), True, []
 
 
 def _score_entry(entry: dict[str, Any], query_tokens: list[str]) -> tuple[int, list[str]]:
-    """Score = 3 x distinct title tokens matched + total hit lines."""
+    """Score = 3 x distinct title tokens matched + capped hit lines."""
     title_tokens = set(tokenize(entry.get("title", "")))
     words = entry.get("words", {})
     matched: list[str] = []
@@ -220,7 +260,9 @@ def _score_entry(entry: dict[str, Any], query_tokens: list[str]) -> tuple[int, l
         matched.append(token)
         line_hits += len(lines)
     title_matches = [token for token in matched if token in title_tokens]
-    return len(title_matches) * 3 + line_hits, matched
+    # cap the line-hit term: raw line counts made a long document with one
+    # repeated token outrank precise multi-term matches
+    return len(title_matches) * 3 + min(line_hits, 12), matched
 
 
 def _build_snippets(
@@ -273,8 +315,10 @@ def cmd_manual_search(args: dict[str, Any]) -> dict[str, Any]:
     if top_k < 1:
         top_k = 3
 
-    entries, index_ref, built = _resolve_index(args.get("path"))
-    query_tokens = tokenize(query)
+    entries, index_ref, built, stale_paths = _resolve_index(args.get("path"))
+    # dedupe: tokenize() can emit the same token twice (e.g. "ok ok"), which
+    # previously double-counted hits and duplicated matchedTerms entries
+    query_tokens = list(dict.fromkeys(tokenize(query)))
     if not query_tokens:
         raise WorkerError(f"query 无有效检索词（去停用词后为空）：{query!r}")
 
@@ -304,6 +348,7 @@ def cmd_manual_search(args: dict[str, Any]) -> dict[str, Any]:
         "total": len(scored),
         "index": index_ref,
         "indexBuiltOnTheFly": built,
+        "staleEntriesDropped": stale_paths or None,
         "inputArgs": {"query": query, "maxResults": max_results, "topK": top_k},
     }
 
@@ -454,14 +499,21 @@ def cmd_error_code_lookup(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _case_searchable_text(case: dict[str, Any]) -> dict[str, str]:
-    titles = " ".join(str(f.get("title", "")) for f in case.get("findings", []) if isinstance(f, dict))
+    findings = case.get("findings")
+    hypotheses = case.get("hypotheses")
+    titles = " ".join(str(f.get("title", "")) for f in findings if isinstance(f, dict)) if isinstance(findings, list) else ""
     hypothesis_parts: list[str] = []
-    for hypothesis in case.get("hypotheses", []):
-        if not isinstance(hypothesis, dict):
-            continue
-        hypothesis_parts.append(str(hypothesis.get("title", "")))
-        hypothesis_parts.append(" ".join(str(v) for v in hypothesis.get("support", [])))
-        hypothesis_parts.append(" ".join(str(v) for v in hypothesis.get("suggestedChecks", [])))
+    if isinstance(hypotheses, list):
+        for hypothesis in hypotheses:
+            if not isinstance(hypothesis, dict):
+                continue
+            hypothesis_parts.append(str(hypothesis.get("title", "")))
+            support = hypothesis.get("support")
+            checks = hypothesis.get("suggestedChecks")
+            if isinstance(support, list):
+                hypothesis_parts.append(" ".join(str(v) for v in support))
+            if isinstance(checks, list):
+                hypothesis_parts.append(" ".join(str(v) for v in checks))
     return {
         "symptom": str(case.get("symptom", "")),
         "title": titles,
@@ -471,7 +523,7 @@ def _case_searchable_text(case: dict[str, Any]) -> dict[str, str]:
 
 def _primary_field(per_field: dict[str, list[str]]) -> str:
     best_count = max((len(v) for v in per_field.values()), default=0)
-    fields = [field for field in ("symptom", "title", "hypothesis") if len(per_field[field]) == best_count]
+    fields = [field for field in ("symptom", "title", "hypothesis") if len(per_field.get(field, [])) == best_count]
     return "+".join(fields)
 
 

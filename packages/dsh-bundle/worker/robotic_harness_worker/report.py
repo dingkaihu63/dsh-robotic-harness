@@ -8,7 +8,6 @@ file with embedded JSON — it needs no server, no build step and no network.
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import time
@@ -16,6 +15,26 @@ from typing import Any
 
 from .core import DiagnosticCase, Run, RunStore, sha256_file, snapshot_environment
 from .diagnostics import load_run_data
+
+
+def _embed_json(payload: Any) -> str:
+    """Serialize JSON for embedding inside a ``<script>`` string literal.
+
+    ``json.dumps`` alone is not safe inside HTML: the sequence ``</script>``
+    would terminate the element, and HTML entities are NOT decoded inside
+    script raw text, so ``html.escape`` (which turns ``"`` into ``&quot;``)
+    breaks ``JSON.parse``. Escape the dangerous characters as JSON unicode
+    escapes instead (plus U+2028/U+2029, which are valid JS but break JSON
+    string literals in some engines).
+    """
+    dumped = json.dumps(payload, ensure_ascii=False)
+    return (
+        dumped.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def export_evidence(
@@ -245,7 +264,7 @@ def dashboard_html(store_root: str, out_path: str) -> str:
                         continue
 
     payload = {"storeRoot": store_root, "runs": runs, "cases": cases}
-    embedded = html.escape(json.dumps(payload, ensure_ascii=False), quote=True)
+    embedded = _embed_json(payload)
     page = _DASHBOARD_TEMPLATE.replace("__PAYLOAD__", embedded)
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(page)
@@ -286,7 +305,7 @@ _DASHBOARD_TEMPLATE = """<!doctype html>
 <div id="runs" class="panel"></div>
 <div id="cases" class="panel"></div>
 <script>
-const payload = JSON.parse(decodeURIComponent("__PAYLOAD__"));
+const payload = JSON.parse("__PAYLOAD__");
 const runs = payload.runs || [], cases = payload.cases || [];
 function show(name) {
   document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === ['overview','runs','cases'].indexOf(name)));
@@ -326,8 +345,8 @@ def timeline_html(run: Run, telemetry: list[dict[str, Any]], case: DiagnosticCas
         "telemetry": telemetry,
         "case": case.to_dict() if case else None,
     }
-    embedded = json.dumps(payload, ensure_ascii=False)
-    page = _TIMELINE_TEMPLATE.replace("__PAYLOAD__", html.escape(embedded, quote=True))
+    embedded = _embed_json(payload)
+    page = _TIMELINE_TEMPLATE.replace("__PAYLOAD__", embedded)
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(page)
     return out_path
@@ -364,7 +383,7 @@ _TIMELINE_TEMPLATE = """<!doctype html>
 <h2>Diagnostics</h2>
 <div id="diagnostics"></div>
 <script>
-const payload = JSON.parse(decodeURIComponent("__PAYLOAD__"));
+const payload = JSON.parse("__PAYLOAD__");
 const run = payload.run, telemetry = payload.telemetry, case_ = payload.case;
 const summary = document.getElementById("summary");
 summary.innerHTML = [
@@ -405,8 +424,8 @@ ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, canvas.height - pad
 
 const events = document.getElementById("events");
 let htmlEvents = '<table><tr><th>t (s)</th><th>kind</th><th>detail</th></tr>';
-run.phases.forEach(p => htmlEvents += `<tr><td>${p.timeS !== undefined ? p.timeS.toFixed(3) : ''}</td><td>phase: ${p.phase}</td><td class="${p.outcome === 'ok' ? 'ok' : 'bad'}">${p.outcome} ${p.detail || ''}</td></tr>`);
-run.anomalies.forEach(a => htmlEvents += `<tr><td>${a.timeS !== undefined ? a.timeS.toFixed(3) : ''}</td><td>anomaly: ${a.kind}</td><td class="bad">${a.detail}</td></tr>`);
+run.phases.forEach(p => htmlEvents += `<tr><td>${p.time_s !== undefined ? p.time_s.toFixed(3) : ''}</td><td>phase: ${p.phase}</td><td class="${p.outcome === 'ok' ? 'ok' : 'bad'}">${p.outcome} ${p.detail || ''}</td></tr>`);
+run.anomalies.forEach(a => htmlEvents += `<tr><td>${a.time_s !== undefined ? a.time_s.toFixed(3) : ''}</td><td>anomaly: ${a.kind}</td><td class="bad">${a.detail}</td></tr>`);
 events.innerHTML = htmlEvents + '</table>';
 
 const diag = document.getElementById("diagnostics");
@@ -414,7 +433,7 @@ if (case_) {
   let out = '<table><tr><th>origin</th><th>finding</th><th>detail</th></tr>';
   case_.findings.forEach(f => out += `<tr><td class="${f.origin}">${f.origin}</td><td>${f.title}</td><td>${f.detail}</td></tr>`);
   out += '</table><h2>Hypotheses</h2><ul>';
-  case_.hypotheses.forEach(h => out += `<li><b>[${h.layer}] ${h.title}</b> (${h.likelihood})<br>support: ${h.support.join('; ')}<br>checks: ${h.suggestedChecks.join('; ')}</li>`);
+  case_.hypotheses.forEach(h => out += `<li><b>[${h.layer}] ${h.title}</b> (${h.likelihood})<br>support: ${h.support.join('; ')}<br>checks: ${h.suggested_checks.join('; ')}</li>`);
   diag.innerHTML = out + '</ul>';
 } else {
   diag.textContent = 'no diagnostic case attached';

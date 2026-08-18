@@ -50,7 +50,12 @@ def normalize_store_root(store_root: str) -> str:
 def _slug(value: str) -> str:
     """Normalize a string into a safe file-name fragment."""
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-")
-    return value or "item"
+    # never allow "." or ".." through: run_dir("..") would resolve outside
+    # the runs/ directory and write records into the store root
+    value = value.strip(".")
+    if value in ("", ".", ".."):
+        return "item"
+    return value
 
 
 def new_id(prefix: str) -> str:

@@ -110,6 +110,17 @@ def test_preflight_ready_with_experiment(tmp_path):
     )
     exp_id = prepared["experimentId"]
     robots.cmd_experiment_request_approval({"experimentId": exp_id, "storeRoot": store_root})
+    # the experiment is only READY_FOR_APPROVAL here — approval must be
+    # granted explicitly (experiment-start with an approver) before preflight
+    # can treat it as valid approval evidence
+    robots.cmd_experiment_start(
+        {
+            "experimentId": exp_id,
+            "approver": "test-human",
+            "approvalRef": "manual-approval-001",
+            "storeRoot": store_root,
+        }
+    )
 
     result = robots.cmd_robot_preflight(
         {"experimentId": exp_id, "cameraCalibrationPath": str(calib), "storeRoot": store_root}
@@ -121,12 +132,14 @@ def test_preflight_ready_with_experiment(tmp_path):
     assert checks["approval.valid"]["status"] == "pass"
     assert checks["recording.ready"]["status"] == "pass"
     assert result["failCount"] == 0
-    assert result["verdict"] == "ready"
+    # hardware checks skip without a real adapter; skip is not safety evidence,
+    # so the verdict cannot be "ready"
+    assert result["verdict"] == "incomplete"
 
     # preflight summary is persisted on the experiment record
     status = robots.cmd_experiment_status({"experimentId": exp_id, "storeRoot": store_root})
     record = json.loads(open(status["recordPath"], encoding="utf-8").read())
-    assert record["preflight"]["verdict"] == "ready"
+    assert record["preflight"]["verdict"] == "incomplete"
     assert record["preflight"]["preflightId"] == result["preflightId"]
 
 

@@ -76,8 +76,11 @@ def _arxiv_query(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _search_arxiv(query: str, max_results: int) -> list[dict[str, Any]]:
+    # query is already an arXiv search expression (see _arxiv_query); wrapping
+    # it in all:"..." a second time corrupts the expression and silently
+    # returns wrong results or a 400.
     params = urllib.parse.urlencode(
-        {"search_query": f'all:"{query}"', "start": 0, "max_results": max_results, "sortBy": "relevance"}
+        {"search_query": query, "start": 0, "max_results": max_results, "sortBy": "relevance"}
     )
     xml_text = _http_get_text(f"{_ARXIV_API}?{params}")
     root = ET.fromstring(xml_text)

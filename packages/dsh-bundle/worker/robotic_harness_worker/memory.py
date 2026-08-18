@@ -41,12 +41,17 @@ _CLOSED_WITH_CONCLUSION_BONUS = 1
 _CASE_STATUSES = {"open", "verified", "rejected", "closed"}
 
 
-def _load_cases(store_root: str) -> list[dict[str, Any]]:
-    """Load every case JSON under ``<storeRoot>/cases/`` with its file path."""
+def _load_cases(store_root: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Load every case JSON under ``<storeRoot>/cases/``.
+
+    Returns ``(cases, corrupted_paths)``: a torn/corrupt case file must be
+    reported, not silently dropped forever.
+    """
     cases_dir = os.path.join(store_root, "cases")
     cases: list[dict[str, Any]] = []
+    corrupted: list[str] = []
     if not os.path.isdir(cases_dir):
-        return cases
+        return cases, corrupted
     for filename in sorted(os.listdir(cases_dir)):
         if not filename.endswith(".json"):
             continue
@@ -55,8 +60,10 @@ def _load_cases(store_root: str) -> list[dict[str, Any]]:
             with open(path, encoding="utf-8") as handle:
                 case = json.load(handle)
         except (OSError, json.JSONDecodeError):
+            corrupted.append(path)
             continue
         if not isinstance(case, dict):
+            corrupted.append(path)
             continue
         case_id = case.get("id") or os.path.splitext(filename)[0]
         cases.append(
@@ -67,13 +74,16 @@ def _load_cases(store_root: str) -> list[dict[str, Any]]:
                 "path": path,
             }
         )
-    return cases
+    return cases, corrupted
 
 
 def _case_anomaly_kinds(case: dict[str, Any]) -> set[str]:
     """Anomaly kinds referenced by the case findings (titles like 'anomaly: xyz')."""
     kinds: set[str] = set()
-    for finding in case.get("findings", []):
+    findings = case.get("findings")
+    if not isinstance(findings, list):
+        return kinds
+    for finding in findings:
         if not isinstance(finding, dict):
             continue
         title = str(finding.get("title", ""))
@@ -100,11 +110,27 @@ def _score_case(
     case = case_entry["case"]
     if not query_tokens and not query_anomaly_kinds:
         return None
+    if _case_searchable_text is None or tokenize is None:
+        return None  # degraded mode: no searchable-text backend available
+    try:
+        searchable = _case_searchable_text(case)
+    except Exception:  # noqa: BLE001 - a malformed case must not abort retrieval
+        return None
+    if not isinstance(searchable, dict):
+        return None
     per_field: dict[str, list[str]] = {}
-    for field, text in _case_searchable_text(case).items():
+    for field, text in searchable.items():
+        if not isinstance(text, str):
+            continue
         field_tokens = set(tokenize(text))
         per_field[field] = [token for token in query_tokens if token in field_tokens]
-    score = sum(len(matched) * _FIELD_WEIGHTS.get(field, 1) for field, matched in per_field.items())
+    # normalize by query length: a 20-token query must not outrank a precise
+    # 3-token one just because it has more tokens
+    query_len = max(len(query_tokens), 1)
+    score = sum(
+        (len(matched) / query_len) * _FIELD_WEIGHTS.get(field, 1)
+        for field, matched in per_field.items()
+    )
 
     matched_kinds = sorted(query_anomaly_kinds & _case_anomaly_kinds(case))
     score += len(matched_kinds) * _ANOMALY_MATCH_BONUS
@@ -122,7 +148,7 @@ def _score_case(
 
     rationale: list[str] = []
     for field in ("symptom", "title", "hypothesis"):
-        if per_field[field]:
+        if per_field.get(field):
             rationale.append(f"{field} 命中 {len(per_field[field])} 个词: {', '.join(sorted(per_field[field])[:8])}")
     if matched_kinds:
         rationale.append(f"异常类型一致: {', '.join(matched_kinds)}")
@@ -187,7 +213,8 @@ def cmd_memory_retrieve(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     related: list[dict[str, Any]] = []
-    for case_entry in _load_cases(store_root):
+    cases, corrupted = _load_cases(store_root)
+    for case_entry in cases:
         if exclude_run_id and case_entry["runId"] == exclude_run_id:
             continue
         scored = _score_case(case_entry, query_tokens, query_anomaly_kinds)
@@ -203,6 +230,7 @@ def cmd_memory_retrieve(args: dict[str, Any]) -> dict[str, Any]:
         "related": selected,
         "total": len(related),
         "limit": limit,
+        "corruptedCaseFiles": corrupted or None,
         "note": "similarity is keyword/anomaly based, not semantic; use rationale and evidence to weigh each case",
         "storeRoot": os.path.abspath(store_root),
     }
@@ -224,7 +252,8 @@ def cmd_memory_ingest(args: dict[str, Any]) -> dict[str, Any]:
     store_root = normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
 
     target: Optional[dict[str, Any]] = None
-    for case_entry in _load_cases(store_root):
+    cases, _corrupted = _load_cases(store_root)
+    for case_entry in cases:
         if case_entry["caseId"] == case_id:
             target = case_entry
             break
@@ -243,8 +272,12 @@ def cmd_memory_ingest(args: dict[str, Any]) -> dict[str, Any]:
     if operator:
         case["operator"] = str(operator)
 
-    with open(target["path"], "w", encoding="utf-8") as handle:
+    # atomic write: a crash mid-write must not corrupt the case file (the
+    # loader would otherwise skip it forever, silently losing the verdict)
+    tmp_path = f"{target['path']}.tmp-{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(case, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, target["path"])
     return {
         "ok": True,
         "caseId": case_id,

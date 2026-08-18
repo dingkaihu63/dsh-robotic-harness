@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -118,6 +119,40 @@ def _save_json(path: str, data: Any) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _require_safe_id(value: str, label: str = "id") -> str:
+    """Validate an identifier used in local AND remote path construction.
+
+    Rejects shell metacharacters (command injection via ssh/scp) and ``..``
+    path traversal into ``<storeRoot>/train-plans|train-jobs``.
+    """
+    if not value or not _ID_RE.fullmatch(value):
+        raise WorkerError(
+            f"invalid {label} {value!r}: only letters, digits, '.', '_' and '-' are allowed"
+        )
+    return value
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Strict boolean coercion: real bools pass through, common string forms
+    are parsed, anything else raises instead of silently being truthy."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off"):
+            return False
+    raise WorkerError(f"expected a boolean, got {value!r}")
 
 
 def _servers_path(store_root: str) -> str:
@@ -228,6 +263,8 @@ def cmd_train_plan_create(args: dict[str, Any]) -> dict[str, Any]:
     os.makedirs(plans_dir, exist_ok=True)
 
     plan_id = args.get("planId") or f"plan-{int(time.time())}"
+    _require_safe_id(str(plan_id).strip(), "planId")
+    plan_id = str(plan_id).strip()
     dataset_ids = [str(d) for d in (args.get("datasetIds") or [])]
     epochs = max(1, int(args.get("epochs", 10)))
     plan: dict[str, Any] = {
@@ -365,13 +402,14 @@ def cmd_train_job_prepare(args: dict[str, Any]) -> dict[str, Any]:
     plan_id = str(args.get("planId") or "").strip()
     if not plan_id:
         raise WorkerError("missing required argument 'planId'")
+    _require_safe_id(plan_id, "planId")
     store_root = normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
     plan_path = os.path.join(store_root, "train-plans", f"{plan_id}.json")
     if not os.path.exists(plan_path):
         raise WorkerError(f"training plan {plan_id!r} not found at {plan_path}; run train-plan-create first")
 
-    dry_run = bool(args.get("dryRun", True))
-    confirm = bool(args.get("confirm", False))
+    dry_run = _as_bool(args.get("dryRun", True), default=True)
+    confirm = _as_bool(args.get("confirm", False), default=False)
     plan = _load_json(plan_path)
     server_id = args.get("serverId") or plan.get("serverId")
     plan = {**plan, "serverId": server_id}
@@ -413,6 +451,7 @@ def cmd_train_job_prepare(args: dict[str, Any]) -> dict[str, Any]:
             raise WorkerError(f"training server unreachable: {output[:200] or 'ssh failed'}")
         work_dir = server.get("workDir") or "~"
         # allowlist: only copy our generated artifacts, only start our launcher.
+        # plan_id is regex-validated above, so it cannot carry shell metacharacters.
         remote_dir = f"{work_dir}/rh-jobs/{plan_id}"
         if shutil.which("scp") is None:
             raise WorkerError("scp is not available on this machine; cannot upload the job")
@@ -424,11 +463,25 @@ def cmd_train_job_prepare(args: dict[str, Any]) -> dict[str, Any]:
         host = server.get("host", "")
         user = server.get("user")
         target = f"{user}@{host}" if user and host else host
-        subprocess.run(scp + ["-r", job_dir, f"{target}:{remote_dir}"], check=True, timeout=120)
-        _, start_output = _run_ssh(server, f"mkdir -p {remote_dir} && cd {remote_dir} && nohup bash launcher.sh > /dev/null 2>&1 & echo $!")
+        # ensure the remote job dir exists BEFORE uploading: scp cannot create
+        # nested dirs, and uploading first would nest files under an existing dir
+        code, mkdir_out = _run_ssh(server, f"mkdir -p {remote_dir}")
+        if code != 0:
+            raise WorkerError(f"failed to create remote job dir {remote_dir}: {mkdir_out[:200] or 'ssh error'}")
+        artifacts_remote = [os.path.join(job_dir, name) for name in ("train.py", "launcher.sh", "plan.snapshot.json")]
+        try:
+            subprocess.run(scp + ["-r", *artifacts_remote, f"{target}:{remote_dir}/"], check=True, timeout=120)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            job["status"] = "failed"
+            _save_json(os.path.join(job_dir, "job.json"), job)
+            raise WorkerError(f"upload to {target}:{remote_dir} failed: {error}") from error
+        code, start_output = _run_ssh(server, f"cd {remote_dir} && nohup bash launcher.sh > run.log 2>&1 & echo $!")
+        if code != 0:
+            raise WorkerError(f"remote launch failed: {start_output[:200] or 'ssh error'}")
         job["status"] = "running"
         job["submitted"] = True
-        job["pid"] = start_output.strip().splitlines()[-1] if start_output.strip() else None
+        pid_text = ((start_output or "").strip().splitlines() or [""])[-1].strip()
+        job["pid"] = pid_text if pid_text.isdigit() else None
         job["remoteDir"] = remote_dir
         job["remoteLog"] = f"{remote_dir}/run.log"
         job["submittedAt"] = _now_iso()
@@ -452,6 +505,7 @@ def cmd_train_job_status(args: dict[str, Any]) -> dict[str, Any]:
     job_id = str(args.get("jobId") or "").strip()
     if not job_id:
         raise WorkerError("missing required argument 'jobId'")
+    _require_safe_id(job_id, "jobId")
     store_root = normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
     job_path = os.path.join(store_root, "train-jobs", job_id, "job.json")
     if not os.path.exists(job_path):
@@ -490,7 +544,8 @@ def cmd_train_report(args: dict[str, Any]) -> dict[str, Any]:
     log_path = args.get("logPath")
     store_root = normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
     if job_id:
-        candidate = os.path.join(store_root, "train-jobs", str(job_id), "run.log")
+        job_id = _require_safe_id(str(job_id).strip(), "jobId")
+        candidate = os.path.join(store_root, "train-jobs", job_id, "run.log")
         if os.path.exists(candidate):
             log_path = candidate
     if not log_path or not os.path.exists(log_path):

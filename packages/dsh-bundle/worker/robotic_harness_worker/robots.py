@@ -199,8 +199,12 @@ def _execute_check(check: dict[str, Any], ctx: dict[str, Any]) -> tuple[str, Opt
         if record is None:
             return "not-checked", None, "未提供 experimentId，无法核验审批状态"
         state = record.get("state")
-        if state in {"READY_FOR_APPROVAL", "APPROVED", "ARMED", "RUNNING", "PAUSED", "RECOVERING"}:
+        # READY_FOR_APPROVAL means the approval was only REQUESTED, never
+        # granted — it must not count as valid approval evidence.
+        if state in {"APPROVED", "ARMED", "RUNNING", "PAUSED", "RECOVERING"}:
             return "pass", {"experimentId": record.get("id"), "state": state}, None
+        if state == "READY_FOR_APPROVAL":
+            return "fail", {"experimentId": record.get("id"), "state": state}, "审批尚未完成：实验处于 READY_FOR_APPROVAL，需人工批准（experiment-start + approvalRef）后执行"
         return "fail", {"experimentId": record.get("id"), "state": state}, f"审批无效：实验状态为 {state}"
     return "not-checked", None, f"未知检查类型 {kind!r}"
 
@@ -214,8 +218,10 @@ def cmd_robot_preflight(args: dict[str, Any]) -> dict[str, Any]:
     if not experiment_id and not robot_model and not hardware_adapter:
         raise WorkerError("需提供 experimentId 或 robotModel/hardwareAdapter 之一")
     auto_run = args.get("autoRun", True)
+    # strict: never execute because of a truthy non-bool (e.g. the string
+    # "false" previously ran every check when the caller asked for generate-only)
     if not isinstance(auto_run, bool):
-        auto_run = True
+        raise WorkerError(f"autoRun must be a boolean, got {auto_run!r}")
 
     ctx: dict[str, Any] = {
         "robotModel": robot_model,
@@ -277,7 +283,9 @@ def cmd_robot_preflight(args: dict[str, Any]) -> dict[str, Any]:
 
     if fail_count > 0:
         verdict = "not-ready"
-    elif not_checked > 0:
+    elif not_checked > 0 or skip_count > 0:
+        # skip is "not safety evidence" (module docstring): a verdict of
+        # "ready" with zero hardware evidence invites false confidence
         verdict = "incomplete"
     else:
         verdict = "ready"

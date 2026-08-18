@@ -31,6 +31,7 @@ export class WorkerInvocationError extends Error {
     message: string,
     readonly exitCode: number | null,
     readonly stderrTail: string,
+    readonly stdoutPayload?: string,
   ) {
     super(message)
     this.name = 'WorkerInvocationError'
@@ -77,6 +78,7 @@ export async function runWorker(
 
   let stdout = ''
   let stderr = ''
+  let timedOut = false
   child.stdout.on('data', (chunk: Buffer) => {
     stdout += chunk.toString('utf8')
   })
@@ -84,21 +86,65 @@ export async function runWorker(
     stderr += chunk.toString('utf8')
   })
   // The worker reads its arguments JSON from stdin (--input -).
+  // Without an 'error' listener the stdin stream can emit an uncaught
+  // EPIPE/'error' when python fails to spawn or exits before consuming stdin.
+  child.stdin.on('error', () => {})
   child.stdin.write(JSON.stringify(args ?? {}))
   child.stdin.end()
 
-  const onAbort = () => {
-    child.kill()
+  const killTree = () => {
+    if (process.platform === 'win32') {
+      // taskkill /T kills the whole process tree (ros2 bag record, ssh/scp
+      // children included); child.kill() alone only SIGTERMs the python proc.
+      try {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+      } catch {
+        child.kill()
+      }
+    } else {
+      // The child is not detached, so it shares our process group: only kill
+      // the direct child (its own children are best-effort reaped by it).
+      child.kill('SIGKILL')
+    }
   }
-  signal?.addEventListener('abort', onAbort, { once: true })
-  const timer = setTimeout(() => child.kill(), config.timeoutMs)
+  const onAbort = () => {
+    killTree()
+  }
+  // If the signal is already aborted the 'abort' event will never fire.
+  if (signal?.aborted) {
+    killTree()
+  } else {
+    signal?.addEventListener('abort', onAbort, { once: true })
+  }
+  const timer = setTimeout(() => {
+    timedOut = true
+    killTree()
+  }, config.timeoutMs)
 
   try {
     await new Promise<void>((resolve, reject) => {
       child.on('error', reject)
       child.on('close', (code) => {
         if (code === 0) resolve()
-        else reject(new WorkerInvocationError(`worker exited with code ${code}`, code, stderr.slice(-2000)))
+        else if (timedOut) {
+          reject(new WorkerInvocationError(`worker ${command} timed out after ${config.timeoutMs} ms`, code, stderr.slice(-2000), stdout.slice(-2000)))
+        } else {
+          // Non-zero exit: the worker may have written a structured
+          // {"ok": false, "error": {...}} payload (with traceback) to stdout
+          // before exiting 1 — surface it instead of throwing it away.
+          let detail = `worker exited with code ${code}`
+          try {
+            const parsed = JSON.parse(stdout.trim())
+            if (parsed?.ok === false && parsed?.error) {
+              const { kind, message, traceback } = parsed.error
+              detail = `worker ${command} failed (${kind ?? 'unknown'}): ${message ?? 'unknown error'}`
+              if (traceback) detail += `\n${String(traceback).slice(-3000)}`
+            }
+          } catch {
+            // stdout was not a structured error payload; keep the generic message
+          }
+          reject(new WorkerInvocationError(detail, code, stderr.slice(-2000), stdout.slice(-2000)))
+        }
       })
     })
   } finally {

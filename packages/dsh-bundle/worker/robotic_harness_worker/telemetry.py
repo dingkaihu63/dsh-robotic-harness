@@ -363,14 +363,17 @@ def _nonfinite_runs(name: str, t: np.ndarray, values: np.ndarray) -> list[dict[s
 
 
 def _threshold_anomalies(name: str, t: np.ndarray, values: np.ndarray, cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    vmin = cfg.get("min")
-    vmax = cfg.get("max")
+    try:
+        vmin = float(cfg["min"]) if cfg.get("min") is not None else None
+        vmax = float(cfg["max"]) if cfg.get("max") is not None else None
+    except (TypeError, ValueError) as error:
+        raise WorkerError(f"thresholds[{name!r}] min/max must be numbers: {error}") from error
     finite = np.isfinite(values)
     mask = np.zeros(len(values), dtype=bool)
     if vmin is not None:
-        mask |= finite & (values < float(vmin))
+        mask |= finite & (values < vmin)
     if vmax is not None:
-        mask |= finite & (values > float(vmax))
+        mask |= finite & (values > vmax)
     bounds = []
     if vmin is not None:
         bounds.append(f"min={vmin:g}")
@@ -411,7 +414,13 @@ def _rate_anomalies(name: str, t: np.ndarray, values: np.ndarray, max_rate: floa
         if len(idx) == 0:
             continue
         tv = t[idx]
-        slopes = np.abs(values[j] - values[idx]) / (float(t[j]) - tv)
+        dt = float(t[j]) - tv
+        # duplicate timestamps make dt == 0 -> inf slope -> false maxRate hits
+        ok = dt > 0
+        if not np.any(ok):
+            continue
+        slopes = np.full(len(tv), -np.inf)
+        slopes[ok] = np.abs(values[j] - values[idx][ok]) / dt[ok]
         k = int(np.argmax(slopes))
         if slopes[k] > max_rate:
             out.append(
@@ -438,7 +447,10 @@ def _spike_anomalies(name: str, t: np.ndarray, values: np.ndarray, sigma: float)
     median = float(np.median(fvals))
     mad = float(np.median(np.abs(fvals - median)))
     if mad <= 0.0:
-        return []  # constant channel -> handled by the constant check
+        # MAD == 0 means the channel is constant except for the outlier(s):
+        # fall back to a relative epsilon so a single spike is still caught
+        # (previously the whole check silently returned []).
+        mad = max(mad, 1e-9 * max(1.0, abs(median)))
     limit = sigma * mad
     mask = finite & (np.abs(values - median) > limit)
     out: list[dict[str, Any]] = []
@@ -467,7 +479,7 @@ def cmd_anomaly_scan(args: dict[str, Any]) -> dict[str, Any]:
     method = (args.get("method") or "all").lower()
     if method not in ("threshold", "rate", "spike", "all"):
         raise WorkerError(f"unknown method {method!r}; expected one of threshold|rate|spike|all")
-    window_s = float(args.get("windowS") or DEFAULT_WINDOW_S)
+    window_s = DEFAULT_WINDOW_S if args.get("windowS") is None else float(args["windowS"])
     if window_s <= 0:
         raise WorkerError("windowS must be > 0")
     thresholds = args.get("thresholds") or {}
@@ -514,10 +526,15 @@ def cmd_anomaly_scan(args: dict[str, Any]) -> dict[str, Any]:
             anomalies.extend(_threshold_anomalies(spec.name, t, values, cfg))
         if method in ("rate", "all") and cfg.get("maxRate") is not None:
             methods_used.append("rate")
-            anomalies.extend(_rate_anomalies(spec.name, t, values, float(cfg["maxRate"]), window_s))
+            try:
+                max_rate = float(cfg["maxRate"])
+            except (TypeError, ValueError) as error:
+                raise WorkerError(f"thresholds[{spec.name!r}].maxRate must be a number: {error}") from error
+            anomalies.extend(_rate_anomalies(spec.name, t, values, max_rate, window_s))
         if method in ("spike", "all"):
             methods_used.append("spike")
-            anomalies.extend(_spike_anomalies(spec.name, t, values, float(cfg.get("spikeSigma") or DEFAULT_SPIKE_SIGMA)))
+            sigma = DEFAULT_SPIKE_SIGMA if cfg.get("spikeSigma") is None else float(cfg["spikeSigma"])
+            anomalies.extend(_spike_anomalies(spec.name, t, values, sigma))
         scanned.append({"name": spec.name, "methods": methods_used})
 
     anomalies.sort(key=lambda a: (a["t"], a["channel"]))

@@ -417,12 +417,26 @@ def analyze_trace(args: dict[str, Any]) -> dict[str, Any]:
             t90 = _crossing_time(t_ok, y_ok, high, step_origin)
             if t10 is not None and t90 is not None:
                 metrics["riseTimeS"] = _r(max(0.0, t90 - t10))
-            band = SETTLING_BAND * abs(final) if abs(final) > 1e-12 else SETTLING_BAND * abs(final - baseline)
+            # Band relative to the larger of |final| and the step amplitude:
+            # a small target value (e.g. 0.001) must not collapse the band to
+            # noise-level and mark every response "unsettled".
+            band = SETTLING_BAND * max(abs(final), abs(final - baseline))
             settle = _settling_time(t_ok, y_ok, final, band, step_origin)
             if settle is not None and step_origin is not None:
                 metrics["settlingTimeS"] = _r(max(0.0, settle - step_origin))
-            peak = float(np.nanmax(y_ok))
-            metrics["overshootPercent"] = _r(max(0.0, peak - final) / abs(final - baseline) * 100.0)
+            # Overshoot must be measured in the STEP DIRECTION: for a step-down
+            # the response overshoots by dipping BELOW final, so the extreme is
+            # the minimum, not the maximum (a plain np.nanmax over the window
+            # would always report ~100% for falling steps).
+            post = y_ok if step_origin is None else y_ok[t_ok >= step_origin]
+            if len(post):
+                if final >= baseline:  # step up
+                    extreme = float(np.nanmax(post))
+                    overshoot = max(0.0, extreme - final)
+                else:  # step down
+                    extreme = float(np.nanmin(post))
+                    overshoot = max(0.0, final - extreme)
+                metrics["overshootPercent"] = _r(overshoot / abs(final - baseline) * 100.0)
         if len(y_ok) >= 32:
             noise_issue = _noise_amplification_issue(t_ok, y_ok)
             if noise_issue:
@@ -748,11 +762,22 @@ def compare_planned_actual(args: dict[str, Any]) -> dict[str, Any]:
     if len(tp) < 2 or len(ta) < 2:
         raise WorkerError("need at least 2 valid samples in both planned and actual trajectories")
 
+    # searchsorted (in _nearest_indices) requires a SORTED reference array;
+    # log files are frequently out of order, so sort both axes (and their
+    # joint columns) before aligning — previously an unsorted actual trace
+    # produced arbitrary nearest matches and silently wrong errors.
+    order_p = np.argsort(tp, kind="mergesort")
+    order_a = np.argsort(ta, kind="mergesort")
+    tp = tp[order_p]
+    ta = ta[order_a]
+    q_p_sorted = {name: q_p_all[name][valid_p][order_p] for name in common}
+    q_a_sorted = {name: q_a_all[name][valid_a][order_a] for name in common}
+
     idx = _nearest_indices(tp, ta)
     per_joint: dict[str, Any] = {}
     max_abs = np.zeros(len(tp))
     for name in common:
-        e = q_p_all[name][valid_p] - q_a_all[name][valid_a][idx]
+        e = q_p_sorted[name] - q_a_sorted[name][idx]
         abs_e = np.abs(e)
         per_joint[name] = {
             "rms": _r(float(np.sqrt(np.mean(e ** 2)))),
@@ -763,9 +788,7 @@ def compare_planned_actual(args: dict[str, Any]) -> dict[str, Any]:
         }
         max_abs = np.maximum(max_abs, abs_e)
 
-    time_offset = _estimate_time_offset(
-        tp, q_p_all[common[0]][valid_p], ta, q_a_all[common[0]][valid_a]
-    )
+    time_offset = _estimate_time_offset(tp, q_p_sorted[common[0]], ta, q_a_sorted[common[0]])
 
     order = np.argsort(tp, kind="mergesort")
     tp_sorted = tp[order]

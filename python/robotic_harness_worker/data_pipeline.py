@@ -166,12 +166,12 @@ def _require(condition: bool, message: str) -> None:
 # tabular IO (csv / jsonl)
 # ---------------------------------------------------------------------------
 
-def _read_csv(path: str) -> tuple[str, list[str], list[dict[str, Any]], int]:
+def _read_csv(path: str, delimiter: str = ",") -> tuple[str, list[str], list[dict[str, Any]], int]:
     columns: list[str] = []
     rows: list[dict[str, Any]] = []
     parse_errors = 0
     with open(path, encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle)
+        reader = csv.reader(handle, delimiter=delimiter)
         try:
             header = next(reader)
         except StopIteration:
@@ -187,7 +187,7 @@ def _read_csv(path: str) -> tuple[str, list[str], list[dict[str, Any]], int]:
                 parse_errors += 1
                 continue
             rows.append(dict(zip(header, line)))
-    return "csv", columns, rows, parse_errors
+    return ("csv" if delimiter == "," else "tsv"), columns, rows, parse_errors
 
 
 def _read_jsonl(path: str) -> tuple[str, list[str], list[dict[str, Any]], int]:
@@ -220,7 +220,9 @@ def _read_table(path: str, fmt: Optional[str] = None) -> tuple[str, list[str], l
     _require(os.path.exists(path), f"file not found: {path}")
     fmt = fmt or _format_of(path)
     if fmt in ("csv", "tsv"):
-        return _read_csv(path)
+        # .tsv files MUST be read with a tab delimiter — the comma default
+        # silently produced a single column with embedded tabs.
+        return _read_csv(path, delimiter="\t" if fmt == "tsv" else ",")
     if fmt in ("jsonl", "ndjson"):
         return _read_jsonl(path)
     raise WorkerError(f"unsupported tabular format {fmt!r}; supported: csv, jsonl (pass format for odd extensions)")
@@ -473,12 +475,19 @@ def cmd_data_schema_inspect(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _nearest_index(times: list[Optional[float]], target: float) -> Optional[int]:
-    """Index of the time value nearest to ``target`` (None when no valid time)."""
-    valid = [(i, v) for i, v in enumerate(times) if v is not None and math.isfinite(v)]
+    """Index of the time value nearest to ``target`` (None when no valid time).
+
+    ``bisect`` requires a SORTED list; raw row order is not guaranteed, so the
+    (time, index) pairs are sorted first — otherwise out-of-order streams
+    produced arbitrary nearest matches with no error.
+    """
+    valid = sorted((v, i) for i, v in enumerate(times) if v is not None and math.isfinite(v))
     if not valid:
         return None
-    ts = [v for _, v in valid]
-    idxs = [i for i, _ in valid]
+    # valid holds (time, original_index) pairs — unpack by POSITION, not by
+    # the comprehension's variable names
+    ts = [t for t, _ in valid]
+    idxs = [idx for _, idx in valid]
     pos = bisect.bisect_left(ts, target)
     if pos == 0:
         return idxs[0]
@@ -546,7 +555,41 @@ def cmd_data_time_sync_estimate(args: dict[str, Any]) -> dict[str, Any]:
         lags = np.arange(-max_lag, max_lag + dt / 2, dt)
         corrs = np.full(len(lags), np.nan)
         min_valid = max(5, int(0.05 * len(t_a)))
+        # FFT-based coarse peak localization: resample both signals onto a
+        # common grid and cross-correlate in O(N log N) (the per-lag loop is
+        # O(L·N) and dominated the command on long logs). The exact Pearson
+        # value is still computed per-lag, but only around the coarse peak.
+        coarse_lag: Optional[float] = None
+        grid = np.arange(min(t_a[0], t_b[0]), max(t_a[-1], t_b[-1]) + dt / 2, dt)
+        if len(grid) >= 16:
+            va_g = np.interp(grid, t_a, v_a)
+            vb_g = np.interp(grid, t_b, v_b)
+            va_c = va_g - va_g.mean()
+            vb_c = vb_g - vb_g.mean()
+            denom = np.sqrt(np.sum(va_c ** 2) * np.sum(vb_c ** 2))
+            if denom > 1e-12:
+                # zero-padded correlation: negative-lag peaks live in the
+                # second half of the 2N array — truncating to [:N] (as a naive
+                # version did) silently lost them and biased the coarse peak
+                corr_full = np.fft.ifft(
+                    np.fft.fft(va_c, 2 * len(grid)) * np.conj(np.fft.fft(vb_c, 2 * len(grid)))
+                ).real
+                n2 = 2 * len(grid)
+                max_k = min(n2 - 1, int(max_lag / dt))
+                region = np.concatenate([np.arange(0, max_k + 1), np.arange(n2 - max_k, n2)])
+                k_best = int(region[int(np.argmax(corr_full[region]))])
+                # corr_full[k] ~= sum_j va[j] * vb[j - k]: a peak at +k means
+                # b leads a by k*dt, i.e. lag = -k*dt (b delayed by +lag)
+                shift_samples = k_best if k_best <= n2 // 2 else k_best - n2
+                shift_seconds = -float(shift_samples) * dt
+                if abs(shift_seconds) <= max_lag:
+                    coarse_lag = shift_seconds
+        refine_window = 3 if coarse_lag is not None else 0
+        if coarse_lag is not None:
+            coarse_pos = bisect.bisect_left(lags.tolist(), coarse_lag)
         for i, lag in enumerate(lags):
+            if coarse_lag is not None and abs(i - coarse_pos) > refine_window:
+                continue
             target = t_a + lag
             valid = (target >= t_b[0]) & (target <= t_b[-1])
             if valid.sum() < min_valid:
@@ -571,7 +614,8 @@ def cmd_data_time_sync_estimate(args: dict[str, Any]) -> dict[str, Any]:
                 offset = float(lags[best])
         else:
             offset = float(lags[best])
-        second_best = float(np.nanmax(np.where(np.arange(len(corrs)) == best, np.nan, corrs)))
+        others = corrs[np.arange(len(corrs)) != best]
+        second_best = float(np.nanmax(others)) if np.any(np.isfinite(others)) else -np.inf
         prominence = peak - second_best
         if peak > 0.9 and prominence > 0.05:
             confidence = "high"
@@ -842,6 +886,12 @@ def _op_interpolate_gaps(rows: list[dict[str, Any]], params: dict[str, Any], tim
         return rows, 0, f"column {column!r} contains non-numeric values (e.g. {unparseable[0]!r}); skipped (categorical columns must not be interpolated)"
     values = [_safe_float(v) for v in raw_values]
     times = [_safe_float(r.get(time_column)) for r in rows]
+    # The gap logic assumes monotonic times: a negative span would satisfy
+    # `span <= max_gap` and extrapolate values outside [0, 1] on unsorted data.
+    if any(t is None or not math.isfinite(t) for t in times):
+        return rows, 0, f"skipped: time column {time_column!r} has missing/non-finite values"
+    if any(t2 < t1 for t1, t2 in zip(times, times[1:])):
+        return rows, 0, f"skipped: time column {time_column!r} is not monotonically increasing"
     n = len(rows)
     out = [dict(r) for r in rows]
     interpolated = 0
@@ -884,6 +934,7 @@ def _op_lowpass(rows: list[dict[str, Any]], params: dict[str, Any], time_column:
     cutoff = float(params.get("cutoffHz", 0.0))
     rate = float(params.get("sampleRateHz", 0.0))
     _require(cutoff > 0 and rate > 0, "lowpass requires positive cutoffHz and sampleRateHz")
+    _require(len(rows) > 0, "lowpass requires at least one data row (empty table)")
     values = [_safe_float(r.get(column)) for r in rows]
     if any(v is None or not math.isfinite(v) for v in values):
         return rows, 0, f"skipped: column {column!r} has missing/non-finite values"
@@ -901,6 +952,7 @@ def _op_median(rows: list[dict[str, Any]], params: dict[str, Any], time_column: 
     _require(column, "median requires 'column'")
     window = int(params.get("window", 5))
     _require(window >= 1, "median window must be >= 1")
+    _require(len(rows) > 0, "median requires at least one data row (empty table)")
     values = [_safe_float(r.get(column)) for r in rows]
     if any(v is None or not math.isfinite(v) for v in values):
         return rows, 0, f"skipped: column {column!r} has missing/non-finite values"
@@ -921,15 +973,21 @@ def _op_resample(rows: list[dict[str, Any]], params: dict[str, Any], time_column
     ts = np.array([pair[0] for pair in valid], dtype=float)
     columns = _union_columns([pair[1] for pair in valid])
     new_t = np.arange(ts[0], ts[-1] + 1e-9, 1.0 / rate)
+    # Build each column's array/numeric flag ONCE: previously they were
+    # rebuilt inside the output loop, making this O(n_out * n_cols * n).
+    column_data: dict[str, tuple[np.ndarray, bool]] = {}
+    for column in columns:
+        if column == time_column:
+            continue
+        arr = np.array([_safe_float(pair[1].get(column)) for pair in valid], dtype=float)
+        numeric = _is_numeric_col([pair[1] for pair in valid], column) and np.all(np.isfinite(arr))
+        column_data[column] = (arr, numeric)
     out: list[dict[str, Any]] = []
     forward_filled: list[str] = []
     for tt in new_t:
         row: dict[str, Any] = {time_column: round(float(tt), 9)}
-        for column in columns:
-            if column == time_column:
-                continue
-            arr = np.array([_safe_float(pair[1].get(column)) for pair in valid], dtype=float)
-            if _is_numeric_col([pair[1] for pair in valid], column) and np.all(np.isfinite(arr)):
+        for column, (arr, numeric) in column_data.items():
+            if numeric:
                 row[column] = round(float(np.interp(tt, ts, arr)), 9)
             else:
                 idx = max(0, min(int(np.searchsorted(ts, tt, side="right")) - 1, len(valid) - 1))
@@ -944,6 +1002,7 @@ def _op_resample(rows: list[dict[str, Any]], params: dict[str, Any], time_column
 def _op_detrend(rows: list[dict[str, Any]], params: dict[str, Any], time_column: str) -> tuple[list[dict[str, Any]], int, str]:
     column = params.get("column")
     _require(column, "detrend requires 'column'")
+    _require(len(rows) > 0, "detrend requires at least one data row (empty table)")
     times = [_safe_float(r.get(time_column)) for r in rows]
     values = [_safe_float(r.get(column)) for r in rows]
     if any(v is None or not math.isfinite(v) for v in values) or any(t is None or not math.isfinite(t) for t in times):
@@ -1687,17 +1746,26 @@ def cmd_data_deidentify(args: dict[str, Any]) -> dict[str, Any]:
 # 12. data-convert-rosbag
 # ---------------------------------------------------------------------------
 
-def _find_rosbag_db(rosbag_path: str) -> str:
-    """Resolve the sqlite db3 file for a rosbag2 bag (file or directory)."""
+def _find_rosbag_dbs(rosbag_path: str) -> list[str]:
+    """Resolve all sqlite db3 segments for a rosbag2 bag (file or directory).
+
+    Split bags have multiple shard files; using only the first one silently
+    drops every later shard's messages.
+    """
     if os.path.isfile(rosbag_path):
-        return rosbag_path
+        return [rosbag_path]
     candidates = sorted(
         os.path.join(rosbag_path, name)
         for name in os.listdir(rosbag_path)
         if name.endswith(".db3") or name.endswith(".db")
     )
     _require(candidates, f"no .db3 sqlite database found under {rosbag_path}")
-    return candidates[0]
+    return candidates
+
+
+def _find_rosbag_db(rosbag_path: str) -> str:
+    """Back-compat: first segment of :func:`_find_rosbag_dbs`."""
+    return _find_rosbag_dbs(rosbag_path)[0]
 
 
 def _decode_rosbag_message(msg_type: str, data: bytes) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -1715,11 +1783,12 @@ def _decode_rosbag_message(msg_type: str, data: bytes) -> tuple[Optional[dict[st
     return None, f"unsupported message type {msg_type!r} (no CDR decoder; wrote t + dataSize only)"
 
 
-def _read_rosbag2(path: str, topics_filter: Optional[list[str]]) -> dict[str, Any]:
+def _read_rosbag2(path: str, topics_filter: Optional[list[str]], time_column: str = "t") -> dict[str, Any]:
     """Minimal rosbag2 sqlite reader (topics/messages/schema tables).
 
     Prefers the ``ros`` worker module when it exists; otherwise falls back to
-    this built-in implementation (Float64 / String CDR decoding).
+    this built-in implementation (Float64 / String CDR decoding). All segments
+    of a split bag are read and merged per topic.
     """
     try:
         from . import ros  # type: ignore[attr-defined]
@@ -1729,54 +1798,50 @@ def _read_rosbag2(path: str, topics_filter: Optional[list[str]]) -> dict[str, An
     except (ImportError, AttributeError):
         pass
 
-    db_path = _find_rosbag_db(path)
-    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    connections = [sqlite3.connect(f"file:{db}?mode=ro", uri=True) for db in _find_rosbag_dbs(path)]
     try:
-        cursor = connection.cursor()
-        topics_cols = [row[1] for row in cursor.execute("PRAGMA table_info(topics)").fetchall()]
-        _require("id" in topics_cols and "name" in topics_cols, "topics table missing id/name columns")
-        type_expr = "type" if "type" in topics_cols else "name"
-        topics = cursor.execute(f"SELECT id, name, {type_expr} FROM topics").fetchall()
-
-        msg_cols = [row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()]
-        ts_col = "timestamp" if "timestamp" in msg_cols else ("t" if "t" in msg_cols else None)
-        _require(ts_col is not None, "messages table has no timestamp/t column")
-        _require("data" in msg_cols, "messages table has no data column")
-
-        selected = {t for t in (topics_filter or [])}
         out: dict[str, Any] = {"topics": [], "unsupported": []}
-        for topic_id, topic_name, msg_type in topics:
-            if selected and topic_name not in selected:
-                continue
-            rows = cursor.execute(
-                f"SELECT {ts_col}, data FROM messages WHERE topic_id=? ORDER BY {ts_col}", (topic_id,)
-            ).fetchall()
-            decoded_rows: list[dict[str, Any]] = []
-            decoded = True
-            note = ""
-            for raw_ts, data in rows:
-                t_seconds = float(raw_ts) / 1e9  # rosbag2 timestamps are nanoseconds
-                fields, reason = _decode_rosbag_message(msg_type, bytes(data or b""))
-                if fields is None:
-                    decoded = False
-                    note = reason
-                    decoded_rows.append({"t": round(t_seconds, 6), "dataSize": len(data or b"")})
-                else:
-                    decoded_rows.append({"t": round(t_seconds, 6), **fields})
-            out["topics"].append(
-                {
-                    "name": topic_name,
-                    "type": msg_type,
-                    "rows": decoded_rows,
-                    "decoded": decoded,
-                    "note": note,
-                }
-            )
-            if not decoded and msg_type not in out["unsupported"]:
-                out["unsupported"].append(msg_type)
+        selected = {t for t in (topics_filter or [])}
+        per_topic: dict[str, dict[str, Any]] = {}
+        for connection in connections:
+            cursor = connection.cursor()
+            topics_cols = [row[1] for row in cursor.execute("PRAGMA table_info(topics)").fetchall()]
+            _require("id" in topics_cols and "name" in topics_cols, "topics table missing id/name columns")
+            type_expr = "type" if "type" in topics_cols else "name"
+            topics = cursor.execute(f"SELECT id, name, {type_expr} FROM topics").fetchall()
+
+            msg_cols = [row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()]
+            ts_col = "timestamp" if "timestamp" in msg_cols else ("t" if "t" in msg_cols else None)
+            _require(ts_col is not None, "messages table has no timestamp/t column")
+            _require("data" in msg_cols, "messages table has no data column")
+
+            for topic_id, topic_name, msg_type in topics:
+                if selected and topic_name not in selected:
+                    continue
+                entry = per_topic.setdefault(
+                    topic_name,
+                    {"name": topic_name, "type": msg_type, "rows": [], "decoded": True, "note": ""},
+                )
+                # stream rows instead of fetchall: multi-GB bags must not be
+                # materialized in RAM before decoding
+                for raw_ts, data in cursor.execute(
+                    f"SELECT {ts_col}, data FROM messages WHERE topic_id=? ORDER BY {ts_col}", (topic_id,)
+                ):
+                    t_seconds = float(raw_ts) / 1e9  # rosbag2 timestamps are nanoseconds
+                    fields, reason = _decode_rosbag_message(msg_type, bytes(data or b""))
+                    if fields is None:
+                        entry["decoded"] = False
+                        entry["note"] = reason
+                        entry["rows"].append({time_column: round(t_seconds, 6), "dataSize": len(data or b"")})
+                    else:
+                        entry["rows"].append({time_column: round(t_seconds, 6), **fields})
+                if msg_type not in out["unsupported"] and not entry["decoded"]:
+                    out["unsupported"].append(msg_type)
+        out["topics"] = list(per_topic.values())
         return out
     finally:
-        connection.close()
+        for connection in connections:
+            connection.close()
 
 
 def cmd_data_convert_rosbag(args: dict[str, Any]) -> dict[str, Any]:
@@ -1790,7 +1855,7 @@ def cmd_data_convert_rosbag(args: dict[str, Any]) -> dict[str, Any]:
     time_column = args.get("timeColumn") or "t"
     topics_filter = args.get("topics")
 
-    data = _read_rosbag2(rosbag_path, topics_filter)
+    data = _read_rosbag2(rosbag_path, topics_filter, time_column=time_column)
     out_files: list[dict[str, Any]] = []
     for topic in data["topics"]:
         safe_name = _slug(topic["name"].lstrip("/").replace("/", "_")) or "topic"
@@ -1830,8 +1895,11 @@ def _expand_q_columns(frame: dict[str, Any]) -> tuple[list[float], list[str]]:
     """Extract joint values from a frame (q list or q0..qN columns)."""
     q = frame.get("q")
     if isinstance(q, (list, tuple)):
-        values = [_safe_float(v) for v in q]
-        return [v for v in values if v is not None], [f"q{i}" for i in range(len(q))]
+        # Keep (index, value) pairs so a filtered-out value cannot shift the
+        # remaining joint values onto the wrong column names.
+        pairs = [(i, _safe_float(v)) for i, v in enumerate(q)]
+        pairs = [(i, v) for i, v in pairs if v is not None]
+        return [v for _, v in pairs], [f"q{i}" for i, _ in pairs]
     columns = sorted((k for k in frame if re.fullmatch(r"q\d*", k)), key=lambda k: (len(k), k))
     if columns:
         return [_safe_float(frame[k]) for k in columns], columns
@@ -1886,19 +1954,37 @@ def cmd_data_export_lerobot(args: dict[str, Any]) -> dict[str, Any]:
 
     # flatten frames with q columns + action (= q) + success
     total_frames = 0
+    missing_timestamps = 0
     all_frames: list[list[dict[str, Any]]] = []
     for episode_id, frames in episodes:
         expanded: list[dict[str, Any]] = []
         for frame in frames:
             q_values, q_columns = _expand_q_columns(frame)
-            row: dict[str, Any] = {"timestamp": _r(_safe_float(frame.get("t")) or 0.0, 9)}
+            t_raw = _safe_float(frame.get("t"))
+            row: dict[str, Any] = {}
+            if t_raw is not None:
+                row["timestamp"] = _r(t_raw, 9)
+            else:
+                # never fabricate 0.0 for a missing timestamp — constant/duplicate
+                # timestamps silently break LeRobot ordering/duration semantics
+                row["timestamp"] = None
+                missing_timestamps += 1
             for i, name in enumerate(q_columns):
-                row[f"q{i}"] = q_values[i] if i < len(q_values) else None
-                row[f"action{i}"] = q_values[i] if i < len(q_values) else None
-            row["success"] = bool(success)
+                value = q_values[i] if i < len(q_values) else None
+                # LeRobot v2 contract: array features are stored as dotted
+                # columns (observation.state.0, action.1, ...) matching the
+                # info.json feature declaration — flat q0/q1 columns did not.
+                row[f"observation.state.{i}"] = value
+                row[f"action.{i}"] = value
+            per_frame_success = frame.get("success")
+            row["success"] = bool(per_frame_success if per_frame_success is not None else success)
             expanded.append(row)
         all_frames.append(expanded)
         total_frames += len(expanded)
+    if missing_timestamps:
+        notes_pre: list[str] = [f"{missing_timestamps} 帧缺少时间戳 t（timestamp 置空）"]
+    else:
+        notes_pre = []
 
     meta_dir = os.path.join(out_dir, "meta")
     chunk_dir = os.path.join(out_dir, "data", "chunk-000")
@@ -1919,11 +2005,11 @@ def cmd_data_export_lerobot(args: dict[str, Any]) -> dict[str, Any]:
     for index, frames in enumerate(all_frames):
         ep_index = index + 1
         base = f"episode_{ep_index:06d}"
-        joint_count = sum(1 for k in frames[0] if re.fullmatch(r"q\d*", k)) if frames else 0
+        joint_count = sum(1 for k in frames[0] if k.startswith("observation.state.")) if frames else 0
         frame_columns = (
             ["timestamp"]
-            + [f"q{i}" for i in range(joint_count)]
-            + [f"action{i}" for i in range(joint_count)]
+            + [f"observation.state.{i}" for i in range(joint_count)]
+            + [f"action.{i}" for i in range(joint_count)]
             + ["success"]
         )
         if parquet_available:
@@ -1970,7 +2056,7 @@ def cmd_data_export_lerobot(args: dict[str, Any]) -> dict[str, Any]:
             "action": {"dtype": "float32", "shape": [joint_count]},
             "success": {"dtype": "bool", "shape": []},
         },
-        "notes": notes,
+        "notes": notes_pre + notes,
     }
     with open(os.path.join(meta_dir, "info.json"), "w", encoding="utf-8") as handle:
         json.dump(info, handle, ensure_ascii=False, indent=2)
@@ -2110,6 +2196,12 @@ def cmd_dataset_version_create(args: dict[str, Any]) -> dict[str, Any]:
     version = str(args.get("version") or "0.1.0")
 
     data_dir = os.path.join(out_dir, "data")
+    if os.path.isdir(out_dir) and os.listdir(out_dir):
+        # versions are supposed to be immutable snapshots — silently rewriting
+        # an existing outDir mutated a previously frozen version
+        raise WorkerError(
+            f"outDir already exists and is not empty: {out_dir}; refusing to overwrite an existing version"
+        )
     os.makedirs(data_dir, exist_ok=True)
     files, total_bytes = 0, 0
     for source in source_paths:
@@ -2118,6 +2210,7 @@ def cmd_dataset_version_create(args: dict[str, Any]) -> dict[str, Any]:
         total_bytes += size
     _require(files > 0, "no files copied from sourcePaths")
 
+    seed = args.get("seed")
     content_hash = _dir_content_hash(data_dir)
     manifest = {
         "schemaVersion": 1,
@@ -2127,6 +2220,7 @@ def cmd_dataset_version_create(args: dict[str, Any]) -> dict[str, Any]:
         "description": args.get("description"),
         "sourcePaths": [_abs(s) for s in source_paths],
         "contentHash": content_hash,
+        "seed": seed,
         "transforms": args.get("transforms"),
         "split": args.get("split"),
         "stats": {"files": files, "totalBytes": total_bytes},
@@ -2276,6 +2370,9 @@ def cmd_dataset_card_generate(args: dict[str, Any]) -> dict[str, Any]:
     for index, source in enumerate(manifest.get("sourcePaths") or []):
         lines.append(f"| source-{index} | `{source}` |")
     for index, transform in enumerate(manifest.get("transforms") or []):
+        if not isinstance(transform, dict):
+            lines.append(f"| transform-{index} | `{transform!r}` (malformed entry) |")
+            continue
         lines.append(f"| transform-{index} | `{transform.get('kind')}` params=`{json.dumps(transform.get('params') or {}, ensure_ascii=False)}` |")
     if manifest.get("split"):
         lines.append(f"| split | `{json.dumps(manifest['split'], ensure_ascii=False)}` |")

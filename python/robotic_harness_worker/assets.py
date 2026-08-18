@@ -529,23 +529,40 @@ def convert_urdf_to_mjcf(urdf_path: str, out_path: str) -> dict[str, Any]:
     import io
     import contextlib
 
-    import mujoco  # noqa: PLC0415
+    # never allow "conversion" to overwrite the source asset
+    if os.path.realpath(os.path.abspath(urdf_path)) == os.path.realpath(os.path.abspath(out_path)):
+        raise WorkerError("refusing to overwrite the source URDF: outPath resolves to the input file")
 
-    directory = os.path.dirname(os.path.abspath(urdf_path))
-    buffer = io.StringIO()
-    with contextlib.redirect_stderr(buffer):
-        model = mujoco.MjModel.from_xml_path(urdf_path)
-    warnings = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+    try:
+        import mujoco  # noqa: PLC0415
+    except ImportError as error:
+        raise WorkerError(
+            "MuJoCo is required for URDF->MJCF conversion; install it with 'pip install mujoco'"
+        ) from error
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    if hasattr(model, "get_xml"):
-        mjcf_xml = model.get_xml()
-        with open(out_path, "w", encoding="utf-8") as handle:
-            handle.write(mjcf_xml)
-    else:
-        # MuJoCo >= 3.x removed MjModel.get_xml(); mj_saveLastXML writes the
-        # XML the model was compiled from.
-        mujoco.mj_saveLastXML(out_path, model)
+    try:
+        directory = os.path.dirname(os.path.abspath(urdf_path))
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            model = mujoco.MjModel.from_xml_path(urdf_path)
+        warnings = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        # write atomically so a crash cannot leave a truncated MJCF at outPath
+        tmp_path = f"{os.path.abspath(out_path)}.tmp-{os.getpid()}"
+        if hasattr(model, "get_xml"):
+            mjcf_xml = model.get_xml()
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                handle.write(mjcf_xml)
+        else:
+            # MuJoCo >= 3.x removed MjModel.get_xml(); mj_saveLastXML writes
+            # the XML the model was compiled from.
+            mujoco.mj_saveLastXML(tmp_path, model)
+        os.replace(tmp_path, os.path.abspath(out_path))
+    except WorkerError:
+        raise
+    except Exception as error:  # noqa: BLE001 - structured conversion failure
+        raise WorkerError(f"URDF->MJCF conversion failed: {type(error).__name__}: {error}") from error
 
     return {
         "ok": True,

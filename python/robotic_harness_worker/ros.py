@@ -54,7 +54,7 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Optional
 
-from .core import WorkerError, new_id
+from .core import WorkerError, new_id, normalize_store_root
 
 try:  # PyYAML is installed in the recommended environment (used for metadata.yaml)
     import yaml  # type: ignore[import-not-found]
@@ -114,13 +114,21 @@ def _run_ros2(argv: list[str], timeout: float = 10.0, ros_domain: Optional[int] 
 
 
 def measure_topic_hz(topic: str, duration_s: float, window: int = 50, ros_domain: Optional[int] = None) -> dict[str, Any]:
-    """Measure topic rate with ``ros2 topic hz`` (spawned, killed after duration)."""
+    """Measure topic rate with ``ros2 topic hz`` (spawned, killed after duration).
+
+    The window is adapted to the measurement duration: ``ros2 topic hz`` only
+    prints stats once its window fills, so a fixed large window would silently
+    report no rate for slow topics. On POSIX the process is stopped with
+    SIGINT so the CLI can flush its final "average rate:" summary; a hard kill
+    would drop it (slow topics would then falsely report 0 Hz).
+    """
     env = os.environ.copy()
     if ros_domain is not None:
         env["ROS_DOMAIN_ID"] = str(int(ros_domain))
+    adaptive_window = max(2, min(int(window), max(2, int(duration_s * 2))))
     try:
         proc = subprocess.Popen(
-            ["ros2", "topic", "hz", topic, "--window", str(window)],
+            ["ros2", "topic", "hz", topic, "--window", str(adaptive_window)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -142,14 +150,26 @@ def measure_topic_hz(topic: str, duration_s: float, window: int = 50, ros_domain
     thread = threading.Thread(target=_drain, daemon=True)
     thread.start()
     time.sleep(max(0.5, duration_s))
-    try:
-        proc.kill()
-    except Exception:  # noqa: BLE001
-        pass
+    if os.name != "nt":
+        try:
+            proc.send_signal(signal.SIGINT)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+    else:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
     try:
         proc.wait(timeout=2)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
     return _parse_topic_hz("".join(chunks))
 
 
@@ -370,21 +390,26 @@ def parse_srdf_groups(path: str) -> dict[str, Any]:
 
 
 def _store_root(args: dict[str, Any]) -> str:
-    return args.get("storeRoot") or os.path.join(os.getcwd(), ".rh")
+    # Normalize like every other module: storeRoot may be the workspace root
+    # OR the RunStore root; appending ".rh" to an already-normalized root
+    # used to produce double-nested <root>/.rh/.rh/ state files.
+    return normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
 
 
 def _state_file(args: dict[str, Any]) -> str:
-    return os.path.join(_store_root(args), ".rh", "rosbag-jobs.json")
+    return os.path.join(_store_root(args), "rosbag-jobs.json")
 
 
 def _allowlist_file(args: dict[str, Any]) -> str:
-    return os.path.join(_store_root(args), ".rh", "ros-allowlist.json")
+    return os.path.join(_store_root(args), "ros-allowlist.json")
 
 
-def _locate_rosbag_db(path: str) -> str:
-    """Resolve a rosbag2 directory or ``.db3`` file to the SQLite database path.
+def _locate_rosbag_dbs(path: str) -> list[str]:
+    """Resolve a rosbag2 bag (directory or ``.db3`` file) to ALL sqlite segments.
 
-    Raises :class:`WorkerError` when the path is not a rosbag2 bag.
+    Split bags (multiple ``*_0.db3``, ``*_1.db3`` shards) are a standard rosbag2
+    feature; returning only the first segment silently drops every later
+    shard's topics and messages.
     """
     if not os.path.exists(path):
         raise WorkerError(f"rosbag path does not exist: {path}")
@@ -398,34 +423,56 @@ def _locate_rosbag_db(path: str) -> str:
             info = yaml.safe_load(handle) or {}
         bag_info = info.get("rosbag2_bagfile_information") or {}
         relative = bag_info.get("relative_file_paths") or []
-        if not relative:
-            raise WorkerError(f"metadata.yaml has no relative_file_paths: {path}")
-        db = os.path.join(path, relative[0])
-        if not os.path.exists(db):
-            raise WorkerError(f"rosbag database file not found: {db}")
-        return db
+        if relative:
+            candidates = [os.path.join(path, rel) for rel in relative]
+        else:
+            candidates = sorted(
+                os.path.join(path, name) for name in os.listdir(path) if name.endswith(".db3")
+            )
+        dbs = [db for db in candidates if os.path.exists(db)]
+        if not dbs:
+            raise WorkerError(f"no rosbag database file found under {path}")
+        return dbs
     if path.lower().endswith(".db3"):
-        return path
+        return [path]
     raise WorkerError(f"not a rosbag2 bag (expected .db3 file or directory with metadata.yaml): {path}")
 
 
+def _locate_rosbag_db(path: str) -> str:
+    """Back-compat: first segment of :func:`_locate_rosbag_dbs`."""
+    return _locate_rosbag_dbs(path)[0]
+
+
+def _open_rosbag_dbs(path: str) -> list[tuple[sqlite3.Connection, str]]:
+    """Open every rosbag SQLite segment read-only, validating it is rosbag2."""
+    dbs: list[tuple[sqlite3.Connection, str]] = []
+    try:
+        for db_path in _locate_rosbag_dbs(path):
+            uri = "file:" + db_path.replace("\\", "/") + "?mode=ro"
+            try:
+                conn = sqlite3.connect(uri, uri=True)
+            except sqlite3.Error as error:
+                raise WorkerError(f"not a valid rosbag2 sqlite database: {db_path} ({error})") from error
+            conn.row_factory = sqlite3.Row
+            try:
+                tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            except sqlite3.Error as error:
+                conn.close()
+                raise WorkerError(f"not a valid rosbag2 sqlite database: {db_path} ({error})") from error
+            if not {"schema", "topics", "messages"} <= tables:
+                conn.close()
+                raise WorkerError(f"not a rosbag2 sqlite bag (missing schema/topics/messages tables): {db_path}")
+            dbs.append((conn, db_path))
+    except Exception:
+        for conn, _ in dbs:
+            conn.close()
+        raise
+    return dbs
+
+
 def _open_rosbag_db(path: str) -> tuple[sqlite3.Connection, str]:
-    """Open the rosbag SQLite database read-only, validating it is rosbag2."""
-    db_path = _locate_rosbag_db(path)
-    uri = "file:" + db_path.replace("\\", "/") + "?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error as error:
-        raise WorkerError(f"not a valid rosbag2 sqlite database: {db_path} ({error})") from error
-    conn.row_factory = sqlite3.Row
-    try:
-        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    except sqlite3.Error as error:
-        conn.close()
-        raise WorkerError(f"not a valid rosbag2 sqlite database: {db_path} ({error})") from error
-    if not {"schema", "topics", "messages"} <= tables:
-        conn.close()
-        raise WorkerError(f"not a rosbag2 sqlite bag (missing schema/topics/messages tables): {db_path}")
+    """Back-compat: open only the first segment of a possibly split bag."""
+    conn, db_path = _open_rosbag_dbs(path)[0]
     return conn, db_path
 
 
@@ -528,14 +575,17 @@ def decode_cdr_float64(data: bytes) -> Optional[float]:
     A fallback layout (encapsulation + 4 pad bytes + float64) is also accepted for
     bags written with 8-byte double alignment.
     """
-    if len(data) >= 12:
-        encapsulation, value = struct.unpack_from("<Id", data, 0)
-        if encapsulation == 0:
-            return value
+    # Check the 16-byte (8-byte-aligned double) layout FIRST: its first branch
+    # would also match the 12-byte canonical layout (both start with a uint32
+    # encapsulation), but reading the double at offset 4 of a 16-byte message
+    # would return the padding bytes (usually 0.0) instead of the value.
     if len(data) >= 16:
         encapsulation = struct.unpack_from("<I", data, 0)[0]
         if encapsulation == 0:
-            value = struct.unpack_from("<d", data, 8)[0]
+            return struct.unpack_from("<d", data, 8)[0]
+    if len(data) >= 12:
+        encapsulation, value = struct.unpack_from("<Id", data, 0)
+        if encapsulation == 0:
             return value
     return None
 
@@ -670,60 +720,113 @@ def inspect_rosbag2(path: str, max_decode_samples: int = 5) -> dict[str, Any]:
     """Inspect a rosbag2 bag (directory with metadata.yaml or a ``.db3`` file).
 
     Reads schema version, topics, per-topic message counts, time range and size
-    statistics straight from SQLite. Common types (Float64, String) are decoded
-    (best-effort); every other type is explicitly listed as count-only.
+    statistics straight from SQLite. Split bags (multiple ``.db3`` segments)
+    are aggregated across ALL segments. Common types (Float64, String) are
+    decoded (best-effort); every other type is explicitly listed as count-only.
     """
-    conn, db_path = _open_rosbag_db(path)
+    segments = _open_rosbag_dbs(path)
     try:
-        version_row = conn.execute("SELECT version FROM schema LIMIT 1").fetchone()
-        version = int(version_row["version"]) if version_row is not None else None
+        version: Optional[int] = None
+        for conn, _ in segments:
+            version_row = conn.execute("SELECT version FROM schema LIMIT 1").fetchone()
+            if version_row is not None:
+                version = int(version_row["version"])
+                break
 
-        topics: list[dict[str, Any]] = []
-        for row in conn.execute("SELECT id, name, type, serialization_format FROM topics ORDER BY id"):
-            topics.append(
-                {
-                    "id": int(row["id"]),
-                    "name": row["name"],
-                    "type": row["type"],
-                    "serializationFormat": row["serialization_format"],
-                }
-            )
+        topics: dict[str, dict[str, Any]] = {}
+        total_messages = 0
+        overall_min: Optional[int] = None
+        overall_max: Optional[int] = None
+        for conn, _ in segments:
+            id_to_name: dict[int, str] = {}
+            for row in conn.execute("SELECT id, name, type, serialization_format FROM topics ORDER BY id"):
+                id_to_name[int(row["id"])] = row["name"]
+                topics.setdefault(
+                    row["name"],
+                    {
+                        "name": row["name"],
+                        "type": row["type"],
+                        "serializationFormat": row["serialization_format"],
+                        "count": 0,
+                        "minStamp": None,
+                        "maxStamp": None,
+                        "avgSizeBytes": 0.0,
+                        "sizeSamples": 0,
+                        "minSizeBytes": 0,
+                        "maxSizeBytes": 0,
+                        "decodedSamples": 0,
+                        "firstValue": None,
+                    },
+                )
+            for row in conn.execute(
+                "SELECT topic_id, COUNT(*) AS c, MIN(timestamp) AS mn, MAX(timestamp) AS mx, "
+                "AVG(LENGTH(data)) AS avg_len, MIN(LENGTH(data)) AS min_len, MAX(LENGTH(data)) AS max_len "
+                "FROM messages GROUP BY topic_id"
+            ):
+                entry = topics.get(id_to_name.get(int(row["topic_id"])))
+                if entry is None:
+                    continue
+                count = int(row["c"])
+                entry["count"] += count
+                total_messages += count
+                if row["mn"] is not None:
+                    stamp = int(row["mn"])
+                    entry["minStamp"] = stamp if entry["minStamp"] is None else min(entry["minStamp"], stamp)
+                if row["mx"] is not None:
+                    stamp = int(row["mx"])
+                    entry["maxStamp"] = stamp if entry["maxStamp"] is None else max(entry["maxStamp"], stamp)
+                avg_len = float(row["avg_len"] or 0.0)
+                entry["avgSizeBytes"] = (
+                    (entry["avgSizeBytes"] * entry["sizeSamples"] + avg_len * count)
+                    / (entry["sizeSamples"] + count)
+                    if (entry["sizeSamples"] + count)
+                    else 0.0
+                )
+                entry["sizeSamples"] += count
+                if row["min_len"] is not None:
+                    value = int(row["min_len"])
+                    entry["minSizeBytes"] = value if entry["sizeSamples"] == count else min(entry["minSizeBytes"], value)
+                if row["max_len"] is not None:
+                    entry["maxSizeBytes"] = max(entry["maxSizeBytes"], int(row["max_len"]))
+                if overall_min is None or (row["mn"] is not None and int(row["mn"]) < overall_min):
+                    overall_min = int(row["mn"])
+                if overall_max is None or (row["mx"] is not None and int(row["mx"]) > overall_max):
+                    overall_max = int(row["mx"])
+            # best-effort sample decoding, bounded per topic across segments
+            for topic_id, topic_name in id_to_name.items():
+                entry = topics[topic_name]
+                decoder = _CDR_DECODERS.get(entry["type"])
+                if decoder is None:
+                    continue
+                need = max_decode_samples - entry["decodedSamples"]
+                if need <= 0:
+                    continue
+                for (data,) in conn.execute(
+                    "SELECT data FROM messages WHERE topic_id=? ORDER BY id LIMIT ?", (topic_id, need)
+                ):
+                    value = decoder(data)
+                    if value is not None:
+                        entry["decodedSamples"] += 1
+                        if entry["firstValue"] is None:
+                            entry["firstValue"] = value
 
-        counts: dict[int, dict[str, Any]] = {}
-        for row in conn.execute(
-            "SELECT topic_id, COUNT(*) AS c, MIN(timestamp) AS mn, MAX(timestamp) AS mx, "
-            "AVG(LENGTH(data)) AS avg_len, MIN(LENGTH(data)) AS min_len, MAX(LENGTH(data)) AS max_len "
-            "FROM messages GROUP BY topic_id"
-        ):
-            counts[int(row["topic_id"])] = {
-                "count": int(row["c"]),
-                "minStamp": int(row["mn"]),
-                "maxStamp": int(row["mx"]),
-                "avgSizeBytes": round(float(row["avg_len"] or 0.0), 1),
-                "minSizeBytes": int(row["min_len"] or 0),
-                "maxSizeBytes": int(row["max_len"] or 0),
-            }
-
-        overall = conn.execute("SELECT MIN(timestamp) AS mn, MAX(timestamp) AS mx, COUNT(*) AS c FROM messages").fetchone()
-        total_messages = int(overall["c"] or 0)
         duration_s = 0.0
-        if overall["mn"] is not None and overall["mx"] is not None:
-            duration_s = round((overall["mx"] - overall["mn"]) / 1e9, 6)
+        if overall_min is not None and overall_max is not None:
+            duration_s = round((overall_max - overall_min) / 1e9, 6)
 
         issues: list[dict[str, Any]] = []
         topic_results: list[dict[str, Any]] = []
-        for topic in topics:
-            stats = counts.get(topic["id"], {"count": 0, "minStamp": None, "maxStamp": None, "avgSizeBytes": 0.0, "minSizeBytes": 0, "maxSizeBytes": 0})
+        for topic in topics.values():
             entry: dict[str, Any] = {
                 "name": topic["name"],
                 "type": topic["type"],
                 "serializationFormat": topic["serializationFormat"],
-                "count": stats["count"],
-                "minStampS": round(stats["minStamp"] / 1e9, 6) if stats["minStamp"] is not None else None,
-                "maxStampS": round(stats["maxStamp"] / 1e9, 6) if stats["maxStamp"] is not None else None,
-                "avgSizeBytes": stats["avgSizeBytes"],
-                "minSizeBytes": stats["minSizeBytes"],
-                "maxSizeBytes": stats["maxSizeBytes"],
+                "count": topic["count"],
+                "minStampS": round(topic["minStamp"] / 1e9, 6) if topic["minStamp"] is not None else None,
+                "maxStampS": round(topic["maxStamp"] / 1e9, 6) if topic["maxStamp"] is not None else None,
+                "avgSizeBytes": round(topic["avgSizeBytes"], 1),
+                "minSizeBytes": topic["minSizeBytes"],
+                "maxSizeBytes": topic["maxSizeBytes"],
             }
             decoder = _CDR_DECODERS.get(topic["type"])
             if decoder is None:
@@ -741,23 +844,13 @@ def inspect_rosbag2(path: str, max_decode_samples: int = 5) -> dict[str, Any]:
                     }
                 )
             else:
-                decoded_samples = 0
-                first_value = None
-                for (data,) in conn.execute(
-                    "SELECT data FROM messages WHERE topic_id=? ORDER BY id", (topic["id"],)
-                ).fetchmany(max_decode_samples):
-                    value = decoder(data)
-                    if value is not None:
-                        if decoded_samples == 0:
-                            first_value = value
-                        decoded_samples += 1
-                entry["decoded"] = decoded_samples > 0
+                entry["decoded"] = topic["decodedSamples"] > 0
                 entry["decodeSummary"] = {
                     "decoded": entry["decoded"],
-                    "samples": decoded_samples,
-                    "firstValue": first_value,
+                    "samples": topic["decodedSamples"],
+                    "firstValue": topic["firstValue"],
                 }
-                if not entry["decoded"] and stats["count"] > 0:
+                if not entry["decoded"] and topic["count"] > 0:
                     issues.append(
                         {
                             "severity": "warning",
@@ -767,11 +860,13 @@ def inspect_rosbag2(path: str, max_decode_samples: int = 5) -> dict[str, Any]:
                     )
             topic_results.append(entry)
 
+        db_paths = [os.path.abspath(db_path) for _, db_path in segments]
         return {
             "ok": True,
             "format": "rosbag2",
             "path": os.path.abspath(path),
-            "dbPath": os.path.abspath(db_path),
+            "dbPath": db_paths[0] if db_paths else None,
+            "dbPaths": db_paths,
             "version": version,
             "storageIdentifier": "sqlite3",
             "durationS": duration_s,
@@ -781,14 +876,17 @@ def inspect_rosbag2(path: str, max_decode_samples: int = 5) -> dict[str, Any]:
             "issues": issues,
         }
     finally:
-        conn.close()
+        for conn, _ in segments:
+            conn.close()
 
 
 def read_rosbag_tf_summary(path: str, max_messages: int = 200) -> dict[str, Any]:
-    """Summarize /tf and /tf_static from a rosbag (frames, time range, rate estimate)."""
-    conn, db_path = _open_rosbag_db(path)
+    """Summarize /tf and /tf_static from a rosbag (frames, time range, rate estimate).
+
+    Aggregates across all segments of a split bag.
+    """
+    segments = _open_rosbag_dbs(path)
     try:
-        topics = {row["name"]: row for row in conn.execute("SELECT id, name, type FROM topics")}
         issues: list[dict[str, Any]] = []
         frames: set[str] = set()
         tf_count = 0
@@ -798,36 +896,38 @@ def read_rosbag_tf_summary(path: str, max_messages: int = 200) -> dict[str, Any]
         time_max: Optional[int] = None
         tf_min: Optional[int] = None
         tf_max: Optional[int] = None
-        for topic_name, is_static in (("/tf", False), ("/tf_static", True)):
-            topic = topics.get(topic_name)
-            if topic is None:
-                issues.append({"code": "tf.missing_topic", "message": f"no {topic_name} topic in bag"})
-                continue
-            for timestamp, data in conn.execute(
-                "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY id LIMIT ?",
-                (topic["id"], max_messages),
-            ):
-                decoded = decode_tf_message(data)
-                if decoded is None:
-                    decode_failures += 1
+        for conn, _ in segments:
+            topics = {row["name"]: row for row in conn.execute("SELECT id, name, type FROM topics")}
+            for topic_name, is_static in (("/tf", False), ("/tf_static", True)):
+                topic = topics.get(topic_name)
+                if topic is None:
+                    issues.append({"code": "tf.missing_topic", "message": f"no {topic_name} topic in bag"})
                     continue
-                for transform in decoded.get("transforms", []):
-                    if transform.get("child_frame_id"):
-                        frames.add(transform["child_frame_id"])
-                    if transform.get("frame_id"):
-                        frames.add(transform["frame_id"])
-                if time_min is None or timestamp < time_min:
-                    time_min = timestamp
-                if time_max is None or timestamp > time_max:
-                    time_max = timestamp
-                if is_static:
-                    tf_static_count += 1
-                else:
-                    tf_count += 1
-                    if tf_min is None or timestamp < tf_min:
-                        tf_min = timestamp
-                    if tf_max is None or timestamp > tf_max:
-                        tf_max = timestamp
+                for timestamp, data in conn.execute(
+                    "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY id LIMIT ?",
+                    (topic["id"], max_messages),
+                ):
+                    decoded = decode_tf_message(data)
+                    if decoded is None:
+                        decode_failures += 1
+                        continue
+                    for transform in decoded.get("transforms", []):
+                        if transform.get("child_frame_id"):
+                            frames.add(transform["child_frame_id"])
+                        if transform.get("frame_id"):
+                            frames.add(transform["frame_id"])
+                    if time_min is None or timestamp < time_min:
+                        time_min = timestamp
+                    if time_max is None or timestamp > time_max:
+                        time_max = timestamp
+                    if is_static:
+                        tf_static_count += 1
+                    else:
+                        tf_count += 1
+                        if tf_min is None or timestamp < tf_min:
+                            tf_min = timestamp
+                        if tf_max is None or timestamp > tf_max:
+                            tf_max = timestamp
         if decode_failures:
             issues.append(
                 {"code": "tf.decode_failed", "message": f"{decode_failures} TF message(s) could not be CDR-decoded"}
@@ -849,37 +949,40 @@ def read_rosbag_tf_summary(path: str, max_messages: int = 200) -> dict[str, Any]
             "issues": issues,
         }
     finally:
-        conn.close()
+        for conn, _ in segments:
+            conn.close()
 
 
 def read_rosbag_diagnostics_summary(path: str, max_messages: int = 200) -> dict[str, Any]:
-    """Summarize /diagnostics from a rosbag (statuses, error/warning counts)."""
-    conn, db_path = _open_rosbag_db(path)
+    """Summarize /diagnostics from a rosbag (statuses, error/warning counts).
+
+    Aggregates across all segments of a split bag.
+    """
+    segments = _open_rosbag_dbs(path)
     try:
-        topic = conn.execute("SELECT id, name, type FROM topics WHERE name='/diagnostics'").fetchone()
-        if topic is None:
-            return {
-                "path": os.path.abspath(path),
-                "statuses": [],
-                "errorCount": 0,
-                "warningCount": 0,
-                "staleCount": 0,
-                "messageCount": 0,
-                "issues": [{"code": "diagnostics.missing_topic", "message": "no /diagnostics topic in bag"}],
-            }
-        rows = conn.execute(
-            "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY id LIMIT ?",
-            (topic["id"], max_messages),
-        ).fetchall()
         statuses: list[dict[str, Any]] = []
         decode_failures = 0
-        for _timestamp, data in rows:
-            decoded = decode_diagnostic_array(data)
-            if decoded is None:
-                decode_failures += 1
-                continue
-            statuses.extend(decoded.get("statuses", []))
+        message_count = 0
         issues: list[dict[str, Any]] = []
+        found = False
+        for conn, _ in segments:
+            topic = conn.execute("SELECT id, name, type FROM topics WHERE name='/diagnostics'").fetchone()
+            if topic is None:
+                continue
+            found = True
+            rows = conn.execute(
+                "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY id LIMIT ?",
+                (topic["id"], max_messages),
+            ).fetchall()
+            message_count += len(rows)
+            for _timestamp, data in rows:
+                decoded = decode_diagnostic_array(data)
+                if decoded is None:
+                    decode_failures += 1
+                    continue
+                statuses.extend(decoded.get("statuses", []))
+        if not found:
+            issues.append({"code": "diagnostics.missing_topic", "message": "no /diagnostics topic in bag"})
         if decode_failures:
             issues.append(
                 {"code": "diagnostics.decode_failed", "message": f"{decode_failures} /diagnostics message(s) could not be CDR-decoded"}
@@ -890,11 +993,12 @@ def read_rosbag_diagnostics_summary(path: str, max_messages: int = 200) -> dict[
             "errorCount": sum(1 for s in statuses if s["level"] == 2),
             "warningCount": sum(1 for s in statuses if s["level"] == 1),
             "staleCount": sum(1 for s in statuses if s["level"] == 3),
-            "messageCount": len(rows),
+            "messageCount": message_count,
             "issues": issues,
         }
     finally:
-        conn.close()
+        for conn, _ in segments:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -919,7 +1023,11 @@ def cmd_ros_graph_snapshot(args: dict[str, Any]) -> dict[str, Any]:
 
     def _call(sub: str, key: str, parser: Callable[[str], Any], default: Any) -> Any:
         try:
-            text = _run_ros2([sub, "list", "-t"], timeout=timeout_s, ros_domain=ros_domain)
+            # `-t` (show types) is only valid for topic/service/action list;
+            # `ros2 node list` accepts no such flag and would print usage text
+            # that the parser would then mistake for node names.
+            argv = [sub, "list", "-t"] if sub != "node" else [sub, "list"]
+            text = _run_ros2(argv, timeout=timeout_s, ros_domain=ros_domain)
             raw[key] = text[:8000]
             return parser(text)
         except Exception as error:  # noqa: BLE001 - report per-command failures
@@ -1229,6 +1337,14 @@ def cmd_rosbag_start(args: dict[str, Any]) -> dict[str, Any]:
     compression = args.get("compression", "none")
     if compression not in ("none", "zstd"):
         raise WorkerError(f"unsupported compression {compression!r}; use 'none' or 'zstd'")
+    max_duration: Optional[float] = None
+    if args.get("maxDurationS") is not None:
+        try:
+            max_duration = float(args["maxDurationS"])
+        except (TypeError, ValueError) as error:
+            raise WorkerError(f"maxDurationS must be a number, got {args['maxDurationS']!r}") from error
+        if max_duration <= 0:
+            raise WorkerError("maxDurationS must be positive")
     if not _ros2_available():
         return _unavailable()
 
@@ -1266,9 +1382,20 @@ def cmd_rosbag_start(args: dict[str, Any]) -> dict[str, Any]:
             "topics": topics,
             "compression": compression,
             "startedAt": time.time(),
+            "maxDurationS": max_duration,
         }
     )
     _save_jobs(args, jobs)
+    if max_duration is not None:
+        # Auto-stop after the requested duration (daemon timer so a worker
+        # command exit cannot cancel it).
+        def _auto_stop() -> None:
+            try:
+                cmd_rosbag_stop({"storeRoot": args.get("storeRoot"), "jobId": job_id})
+            except Exception:  # noqa: BLE001 - background stop must not crash the process
+                pass
+
+        threading.Timer(max_duration, _auto_stop, daemon=True).start()
     return {
         "ok": True,
         "backend": "ros2",
@@ -1277,6 +1404,7 @@ def cmd_rosbag_start(args: dict[str, Any]) -> dict[str, Any]:
         "pid": proc.pid,
         "topics": topics or None,
         "compression": compression,
+        "maxDurationS": max_duration,
         "note": None if topics else "recording all topics (no allowlist provided)",
         "inputArgs": {"bagPath": bag_path, "topicCount": len(topics) if topics else None},
     }
@@ -1304,15 +1432,24 @@ def cmd_rosbag_stop(args: dict[str, Any]) -> dict[str, Any]:
                 )
                 stopped = result.returncode == 0
             else:
-                os.kill(int(pid), signal.SIGTERM)
+                # SIGINT lets `ros2 bag record` finalize its metadata; SIGTERM
+                # would leave an incomplete bag.
+                os.kill(int(pid), signal.SIGINT)
                 stopped = True
         except ProcessLookupError:
             # the process is already gone; the job is still considered stopped
             stopped = True
         except Exception:  # noqa: BLE001 - process may already be gone
             stopped = False
-    remaining = [job for job in jobs if job.get("jobId") != job_id]
-    _save_jobs(args, remaining)
+    if stopped:
+        remaining = [job for job in jobs if job.get("jobId") != job_id]
+        _save_jobs(args, remaining)
+    else:
+        # Keep the entry when termination failed so the job stays trackable
+        # and can be retried (previously it was dropped and the recorder
+        # process became un-stoppable).
+        entry["stopFailed"] = True
+        _save_jobs(args, jobs)
     return {"ok": True, "stopped": stopped, "bagPath": entry.get("bagPath"), "jobId": job_id}
 
 
@@ -1421,8 +1558,13 @@ def _load_jobs(args: dict[str, Any]) -> list[dict[str, Any]]:
 def _save_jobs(args: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     path = _state_file(args)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    # atomic write: a crash mid-write must not truncate the state file (a
+    # truncated file would otherwise be read back as [] and every tracked
+    # recorder process would become un-stoppable)
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(jobs, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
 
 
 # ---------------------------------------------------------------------------

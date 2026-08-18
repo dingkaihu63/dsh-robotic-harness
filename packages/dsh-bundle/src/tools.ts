@@ -96,7 +96,7 @@ const TOOL_SPECS: ToolSpec[] = [
     command: 'convert-urdf',
     parameters: {
       path: { type: 'string', required: true, description: 'Absolute path to the URDF file' },
-      outPath: { type: 'string', description: 'Absolute path for the generated MJCF' },
+      outPath: { type: 'string', required: true, description: 'Absolute path for the generated MJCF' },
     },
   },
   {
@@ -294,7 +294,6 @@ const TOOL_SPECS: ToolSpec[] = [
       timeColumn: { type: 'string', description: 'Time column; default t' },
       setpointColumn: { type: 'string', description: 'Reference column; default setpoint' },
       measurementColumn: { type: 'string', description: 'Measurement column; default measurement' },
-      outputColumn: { type: 'string', description: 'Controller output column; default output' },
       effortColumn: { type: 'string', description: 'Effort column (alias); default effort' },
       effortMin: { type: 'number', description: 'Effort lower clamp for saturation detection' },
       effortMax: { type: 'number', description: 'Effort upper clamp' },
@@ -330,8 +329,8 @@ const TOOL_SPECS: ToolSpec[] = [
     parameters: {
       plannedPath: { type: 'string', required: true, description: 'Planned trajectory file' },
       actualPath: { type: 'string', required: true, description: 'Actual trajectory file' },
-      timeColumnPlanned: { type: 'string', description: 'Planned time column; default t' },
-      timeColumnActual: { type: 'string', description: 'Actual time column; default t' },
+      plannedTimeColumn: { type: 'string', description: 'Planned time column; default t' },
+      actualTimeColumn: { type: 'string', description: 'Actual time column; default t' },
       threshold: { type: 'number', description: 'Divergence threshold; default 0.02' },
     },
   },
@@ -369,8 +368,8 @@ const TOOL_SPECS: ToolSpec[] = [
       path: { type: 'string', required: true, description: 'Step response data file' },
       timeColumn: { type: 'string', description: 'Time column; default t' },
       measurementColumn: { type: 'string', description: 'Measurement column; default measurement' },
-      stepStartS: { type: 'number', description: 'Step onset time' },
-      stepEndS: { type: 'number', description: 'Fit window end' },
+      stepStart: { type: 'number', description: 'Step onset time' },
+      stepEnd: { type: 'number', description: 'Fit window end' },
     },
   },
   {

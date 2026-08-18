@@ -85,8 +85,14 @@ export async function apply(ctx: Context, config: Config) {
   let registered = 0
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    const skillPath = join(skillsDir, entry.name, 'SKILL.md')
-    if (!existsSync(skillPath)) continue
+    // Match the skill file case-insensitively: two bundled skills ship as
+    // lowercase `skill.md`, and on case-sensitive filesystems (Linux/macOS)
+    // a literal 'SKILL.md' probe would silently skip them.
+    const skillFile = (await readdir(join(skillsDir, entry.name))).find(
+      (name) => name.toLowerCase() === 'skill.md',
+    )
+    if (!skillFile) continue
+    const skillPath = join(skillsDir, entry.name, skillFile)
     try {
       const raw = await readFile(skillPath, 'utf8')
       const skill = parseSkillFile(raw, skillPath)

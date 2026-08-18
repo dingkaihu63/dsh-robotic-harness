@@ -77,6 +77,8 @@ def color_segmentation(
     """
     cv2 = _require_cv2()
     started = time.time()
+    if len(apply_offset_px) != 2:
+        raise ValueError(f"apply_offset_px must have 2 elements (dx, dy), got {apply_offset_px!r}")
     try:
         bgr = _to_bgr(image)
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)  # type: ignore[attr-defined]
@@ -91,10 +93,31 @@ def color_segmentation(
             if color not in presets:
                 raise ValueError(f"unknown color {color!r}; pass hsvRange or use one of {sorted(presets)}")
             hsv_range = presets[color]
+        # Validate before the uint8 cast: out-of-range values would silently
+        # wrap (e.g. S=300 -> 44) and produce a wrong mask with no error.
+        for value, name, upper_bound in (
+            (hsv_range[0], "H low", 179),
+            (hsv_range[1], "H high", 179),
+            (hsv_range[2], "S low", 255),
+            (hsv_range[3], "S high", 255),
+            (hsv_range[4], "V low", 255),
+            (hsv_range[5], "V high", 255),
+        ):
+            if not (0 <= int(value) <= upper_bound):
+                raise ValueError(f"hsvRange {name}={value} out of range [0, {upper_bound}]")
         lower = np.array([hsv_range[0], hsv_range[2], hsv_range[4]], dtype=np.uint8)
         upper = np.array([hsv_range[1], hsv_range[3], hsv_range[5]], dtype=np.uint8)
 
         mask = cv2.inRange(hsv, lower, upper)  # type: ignore[attr-defined]
+        if hsv_range[0] == 0 and 0 < hsv_range[1] <= 90:
+            # hue wrap: a band starting at H=0 also covers the high end
+            # (red spans ~0-10 AND ~170-180 in OpenCV HSV)
+            wrap_low = 180 - hsv_range[1]
+            mask |= cv2.inRange(  # type: ignore[attr-defined]
+                hsv,
+                np.array([wrap_low, hsv_range[2], hsv_range[4]], dtype=np.uint8),
+                np.array([179, hsv_range[3], hsv_range[5]], dtype=np.uint8),
+            )
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # type: ignore[attr-defined]
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore[attr-defined]
         best = None
@@ -158,6 +181,8 @@ def saliency_segmentation(
     """
     cv2 = _require_cv2()
     started = time.time()
+    if len(apply_offset_px) != 2:
+        raise ValueError(f"apply_offset_px must have 2 elements (dx, dy), got {apply_offset_px!r}")
     try:
         gray = cv2.cvtColor(_to_bgr(image), cv2.COLOR_BGR2GRAY)  # type: ignore[attr-defined]
         edges = cv2.Canny(gray, 50, 150)  # type: ignore[attr-defined]
@@ -208,6 +233,7 @@ def route_perception(
     perception: str = "auto",
     color: str = "red",
     fault: dict[str, Any] | None = None,
+    min_area: int = 40,
 ) -> dict[str, Any]:
     """Rule-based perception router.
 
@@ -223,8 +249,17 @@ def route_perception(
     """
     fault = fault or {}
     offset = tuple(fault.get("perception_offset_px", [0.0, 0.0]))
-    timeout_s = float(fault.get("model_timeout_s", 0.0))
-    occlusion = bool(fault.get("occlusion", False))
+    if len(offset) != 2:
+        raise ValueError(f"perception_offset_px must have 2 elements, got {offset!r}")
+    try:
+        timeout_s = float(fault.get("model_timeout_s", 0.0))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"model_timeout_s must be a number, got {fault.get('model_timeout_s')!r}") from error
+    occlusion_value = fault.get("occlusion", False)
+    if isinstance(occlusion_value, str):
+        occlusion = occlusion_value.strip().lower() in ("true", "1", "yes")
+    else:
+        occlusion = bool(occlusion_value)
 
     attempt: dict[str, Any] = {"route": perception, "reason": "explicit route"}
     used_route: str | None = None
@@ -238,12 +273,12 @@ def route_perception(
     for candidate in candidates:
         if candidate == "color":
             result = color_segmentation(
-                image, color=color, apply_offset_px=offset, rng=rng, latency_s=timeout_s if timeout_s > 0 else 0.0
+                image, color=color, min_area=min_area, apply_offset_px=offset, rng=rng, latency_s=timeout_s if timeout_s > 0 else 0.0
             )
             used_route = "color"
         else:
             result = saliency_segmentation(
-                image, apply_offset_px=offset, rng=rng, latency_s=timeout_s if timeout_s > 0 else 0.05
+                image, min_area=min_area, apply_offset_px=offset, rng=rng, latency_s=timeout_s if timeout_s > 0 else 0.05
             )
             used_route = "saliency"
         if result.get("ok"):

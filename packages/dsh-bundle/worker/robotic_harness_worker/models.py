@@ -38,6 +38,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -466,7 +467,16 @@ def _infer_external(model: dict[str, Any], inp: dict[str, Any], timeout_ms: Opti
             )
         started = time.perf_counter()
         try:
-            out = fn(inp)
+            if timeout_ms is not None and timeout_ms > 0:
+                # bound module-backed inference: a hung entrypoint used to
+                # block the whole worker subprocess indefinitely
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(fn, inp)
+                    out = future.result(timeout=timeout_ms / 1000.0)
+            else:
+                out = fn(inp)
+        except concurrent.futures.TimeoutError:
+            raise WorkerError(f"external model entrypoint timed out after {timeout_ms:.0f} ms") from None
         except WorkerError:
             raise
         except Exception as error:
@@ -494,8 +504,16 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return _json_safe(value.tolist())
     if isinstance(value, np.generic):
-        return value.item()
-    return value
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        # NaN/Inf serialize as bare NaN/Infinity tokens that the TS side's
+        # JSON.parse rejects — map them to null
+        return None
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    return str(value)
 
 
 def _input_summary(inp: dict[str, Any]) -> dict[str, Any]:

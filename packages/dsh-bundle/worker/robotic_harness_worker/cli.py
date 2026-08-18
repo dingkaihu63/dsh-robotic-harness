@@ -15,13 +15,28 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import os
 import sys
 import traceback
 from typing import Any, Callable
 
 from . import __version__, WORKER_CAPABILITIES
-from .core import RunStore, WorkerError, new_id, snapshot_environment
+from .core import RunStore, WorkerError, normalize_store_root, new_id, snapshot_environment
+
+
+def _arg_seed(args: dict[str, Any], default: int = 42) -> int:
+    """Strictly parse the ``seed`` argument; never crash on non-numeric input."""
+    value = args.get("seed")
+    if value is None:
+        return default
+    try:
+        seed = int(float(value))
+    except (TypeError, ValueError) as error:
+        raise WorkerError(f"seed must be a number, got {value!r}") from error
+    if not math.isfinite(seed):
+        raise WorkerError(f"seed must be finite, got {value!r}")
+    return seed
 
 
 def _read_args(parser_args: argparse.Namespace) -> dict[str, Any]:
@@ -30,8 +45,11 @@ def _read_args(parser_args: argparse.Namespace) -> dict[str, Any]:
     if parser_args.input == "-":
         raw = sys.stdin.read()
     else:
-        with open(parser_args.input, encoding="utf-8") as handle:
-            raw = handle.read()
+        try:
+            with open(parser_args.input, encoding="utf-8") as handle:
+                raw = handle.read()
+        except OSError as error:
+            raise WorkerError(f"cannot read input file {parser_args.input}: {error}") from error
     if not raw.strip():
         return {}
     try:
@@ -44,7 +62,10 @@ def _read_args(parser_args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _store_for(args: dict[str, Any]) -> RunStore:
-    root = args.get("storeRoot") or os.path.join(os.getcwd(), ".rh")
+    # Normalize the store root exactly like every other module: the TS side
+    # passes the RunStore root (<ws>/.rh); passing the workspace root through
+    # raw used to scatter runs/cases outside the shared .rh store.
+    root = normalize_store_root(args.get("storeRoot") or os.path.join(os.getcwd(), ".rh"))
     store = RunStore(root)
     store.ensure()
     return store
@@ -165,7 +186,16 @@ def cmd_sim_validate_scenario(args: dict[str, Any]) -> dict[str, Any]:
     path = config.get("path") or args.get("path")
     if path:
         loaded = load_scenario(path)
-        return {"ok": True, "name": loaded["name"], "validated": validate_scenario(loaded)}
+        validated = validate_scenario(loaded)
+        # surface validation failures in the top-level ok flag (the TS tools
+        # gate on it) — previously ok was hardcoded True for path inputs
+        return {
+            "ok": validated["ok"],
+            "name": loaded["name"],
+            "validated": validated,
+            "issues": validated.get("issues", []),
+            "resolved": validated.get("resolved", []),
+        }
     validated = validate_scenario(config)
     return {"ok": validated["ok"], "issues": validated["issues"], "resolved": validated["resolved"]}
 
@@ -179,7 +209,7 @@ def cmd_sim_run(args: dict[str, Any]) -> dict[str, Any]:
 
         scenario_config = load_scenario(scenario_config)
     fault = args.get("fault", {})
-    seed = int(args.get("seed", 42))
+    seed = _arg_seed(args)
     store = _store_for(args)
     run, telemetry = run_pick_place(
         scenario_config,
@@ -285,7 +315,7 @@ def cmd_demo(args: dict[str, Any]) -> dict[str, Any]:
     from .simulation import load_scenario, run_pick_place
 
     store = _store_for(args)
-    seed = int(args.get("seed", 42))
+    seed = _arg_seed(args)
     scenario = load_scenario(args.get("scenario", "mujoco_pick_place"))
     demo_dir = args.get("demoDir") or os.path.join(store.root, "demo")
     os.makedirs(demo_dir, exist_ok=True)
@@ -334,7 +364,7 @@ def cmd_sim_fault_inject(args: dict[str, Any]) -> dict[str, Any]:
     run, _ = run_pick_place(
         scenario_config,
         args.get("fault", {}),
-        int(args.get("seed", 42)),
+        _arg_seed(args),
         store=store,
         run_id=args.get("runId") or new_id("run"),
     )
@@ -484,6 +514,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = _read_args(args)
         result = COMMANDS[args.command](arguments)
+        if not isinstance(result, dict):
+            raise WorkerError(
+                f"command {args.command} returned a non-object result ({type(result).__name__}); "
+                "domain commands must return a JSON object"
+            )
         result.setdefault("ok", True)
         _write_output(args, result)
         return 0
@@ -491,6 +526,9 @@ def main(argv: list[str] | None = None) -> int:
         _write_output(args, {"ok": False, "error": {"kind": "worker", "message": str(error)}})
         return 0
     except Exception as error:  # noqa: BLE001 - report any failure as a structured error
+        # internal errors also go to stderr so callers that reject non-zero
+        # exits without reading stdout still see the real failure
+        print(traceback.format_exc(), file=sys.stderr)
         _write_output(
             args,
             {"ok": False, "error": {"kind": "internal", "message": f"{type(error).__name__}: {error}", "traceback": traceback.format_exc()}},

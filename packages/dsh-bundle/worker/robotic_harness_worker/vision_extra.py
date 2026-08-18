@@ -468,12 +468,33 @@ def _parse_image_size(value: Any) -> Optional[tuple[int, int]]:
     return None
 
 
+def _as_matrix(value: Any, label: str) -> np.ndarray:
+    """Coerce a calibration matrix value into a numeric ndarray.
+
+    Accepts nested lists AND the OpenCV FileStorage ``{rows, cols, dt, data}``
+    dict form; raises a structured WorkerError instead of a raw ValueError.
+    """
+    if isinstance(value, dict):
+        data = value.get("data")
+        if isinstance(data, list):
+            value = data
+        else:
+            raise WorkerError(f"{label} must be a numeric array; got a dict without a 'data' list")
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise WorkerError(f"{label} must be a numeric array, got {type(value).__name__}") from error
+    if arr.ndim == 0:
+        raise WorkerError(f"{label} must be a numeric array, got a scalar")
+    return arr
+
+
 def _extract_intrinsics(data: dict[str, Any]) -> tuple[Optional[np.ndarray], dict[str, float]]:
     """Return (K or None, flat dict of fx/fy/cx/cy when found)."""
     for wrapper in _wrappers(data):
         matrix = _pick(wrapper, "cameraMatrix", "camera_matrix", "intrinsics", "K", "mtx", "cameraMatrixList")
         if matrix is not None:
-            arr = np.asarray(matrix, dtype=float)
+            arr = _as_matrix(matrix, "cameraMatrix")
             if arr.ndim == 1 and arr.size == 9:
                 arr = arr.reshape(3, 3)
             if arr.ndim == 1 and arr.size == 4:
@@ -481,6 +502,7 @@ def _extract_intrinsics(data: dict[str, Any]) -> tuple[Optional[np.ndarray], dic
                 return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]), {"fx": fx, "fy": fy, "cx": cx, "cy": cy}
             if arr.shape == (3, 3):
                 return arr, {"fx": float(arr[0, 0]), "fy": float(arr[1, 1]), "cx": float(arr[0, 2]), "cy": float(arr[1, 2])}
+            raise WorkerError(f"cameraMatrix must be 3x3, 9 or 4 elements, got shape {arr.shape}")
         fx = _pick(wrapper, "fx", "focalLengthX", "focal_length_x", "focal_x")
         if fx is not None:
             fy = _pick(wrapper, "fy", "focalLengthY", "focal_length_y", "focal_y")
@@ -628,12 +650,30 @@ def _check_extrinsic(prefix: str, rotation: Optional[np.ndarray], translation: O
     return summary
 
 
+def _yaml_loader() -> Any:
+    """A PyYAML SafeLoader that understands OpenCV's ``!!opencv-matrix`` tag.
+
+    ``cv2.FileStorage`` exports (the most common calibration files in the
+    wild) use ``camera_matrix: !!opencv-matrix {rows, cols, dt, data: [...]}``;
+    ``safe_load`` rejects the unknown tag with a ConstructorError.
+    """
+    ymod = _require_yaml()
+    try:
+        ymod.SafeLoader.add_constructor(
+            "tag:yaml.org,2002:opencv-matrix",
+            lambda loader, node: loader.construct_mapping(node, deep=True),
+        )
+    except Exception:  # noqa: BLE001 - best-effort registration
+        pass
+    return ymod
+
+
 def _load_calibration(path: str) -> tuple[dict[str, Any], str]:
     if not os.path.exists(path):
         raise WorkerError(f"calibration file not found: {path}")
     ext = os.path.splitext(path)[1].lower()
     if ext in (".yaml", ".yml"):
-        ymod = _require_yaml()
+        ymod = _yaml_loader()
         with open(path, encoding="utf-8") as handle:
             try:
                 data = ymod.safe_load(handle)
@@ -646,7 +686,7 @@ def _load_calibration(path: str) -> tuple[dict[str, Any], str]:
         try:
             data = json.load(handle)
         except json.JSONDecodeError as error:
-            ymod = _require_yaml()
+            ymod = _yaml_loader()
             handle.seek(0)
             try:
                 data = ymod.safe_load(handle)
@@ -756,8 +796,12 @@ def cmd_calibration_inspect(args: dict[str, Any]) -> dict[str, Any]:
     extrinsics: dict[str, Any] = {}
     for key, prefix in (("stereoTransform", "stereo"), ("handEyeTransform", "handeye")):
         value = None
+        # per-prefix fallback keys: previously both loops accepted
+        # "stereo_transform" AND "hand_eye_transform", so a file with only one
+        # of them reported the same transform under BOTH labels
+        fallbacks = ("stereo_transform",) if prefix == "stereo" else ("hand_eye_transform",)
         for wrapper in _wrappers(data):
-            candidate = _pick(wrapper, key, "stereo_transform", "hand_eye_transform")
+            candidate = _pick(wrapper, key, *fallbacks)
             if candidate is not None:
                 value = candidate
                 break
@@ -1067,7 +1111,11 @@ def cmd_perception_run(args: dict[str, Any]) -> dict[str, Any]:
 
     image = _read_rgb(image_path)
     started = time.time()
-    decision = vision.route_perception(image, {}, rng=None, perception=route, color=color, fault=fault)
+    # forward minArea into the router: without this the segmentation defaults
+    # (min_area=40) silently won — a documented minArea=10 still required 40px
+    decision = vision.route_perception(
+        image, {}, rng=None, perception=route, color=color, fault=fault, min_area=int(min_area) if min_area is not None else 40
+    )
     latency_ms = round((time.time() - started) * 1000, 1)
 
     if decision.get("ok") and min_area is not None:

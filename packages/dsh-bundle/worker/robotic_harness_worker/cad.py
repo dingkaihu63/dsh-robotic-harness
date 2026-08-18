@@ -139,7 +139,32 @@ def _parse_step_header(path: str) -> dict[str, Any]:
         return meta
     match = re.search(r"FILE_NAME\((.*?)\);", head, re.S)
     if match:
-        parts = [p.strip() for p in match.group(1).split(",")]
+        # STEP string fields are comma-separated, but author/organization are
+        # parenthesized LISTS of quoted strings ('John','Jane') — a plain
+        # split(",") shifts every following field by the list length. Split on
+        # top-level commas only (outside quotes and parentheses).
+        raw = match.group(1)
+        parts: list[str] = []
+        current: list[str] = []
+        depth = 0
+        in_quote = False
+        for char in raw:
+            if char == "'":
+                in_quote = not in_quote
+                current.append(char)
+            elif char == "(" and not in_quote:
+                depth += 1
+                current.append(char)
+            elif char == ")" and not in_quote:
+                depth -= 1
+                current.append(char)
+            elif char == "," and depth == 0 and not in_quote:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+        if current:
+            parts.append("".join(current).strip())
         fields = ["name", "timestamp", "author", "organization", "preprocessor", "system", "authoringSystem"]
         for field, part in zip(fields, parts):
             value = part.strip("'\"").strip("()")
@@ -483,10 +508,15 @@ def _try_binary_stl(path: str, head: bytes) -> Optional[np.ndarray]:
         if len(head) < 84:
             return None
         count = struct.unpack("<I", head[80:84])[0]
-        if count == 0:
-            return None
         size = os.path.getsize(path)
-        if size != 84 + count * 50:
+        if count == 0:
+            # a size-84 header with count==0 is a valid EMPTY binary mesh;
+            # anything longer with count==0 is garbage (fall through to ASCII,
+            # which will also fail -> structured error)
+            return np.zeros((0, 3, 3), dtype=np.float64) if size == 84 else None
+        # accept trailing bytes after the triangle records: many tools append
+        # footers — the old exact-size check rejected them
+        if size < 84 + count * 50:
             return None
         with open(path, "rb") as handle:
             handle.seek(84)
@@ -538,6 +568,21 @@ def _mesh_stats(
     """Shared vertex/bounds/area statistics for STL and OBJ."""
     triangles = np.asarray(triangles, dtype=np.float64)
     count = int(triangles.shape[0])
+    if count == 0:
+        # an OBJ with vertices but zero valid faces (or an empty binary STL)
+        # must produce a structured result, not a numpy reduction crash
+        return {
+            "format": fmt,
+            "path": path,
+            "vertices": 0,
+            "vertexRecords": 0,
+            "triangles": 0,
+            "bounds": {"min": [None, None, None], "max": [None, None, None], "size": [None, None, None]},
+            "degenerateTriangles": 0,
+            "duplicateVertices": 0,
+            "issues": issues,
+            "note": "网格为空（无有效三角面）",
+        }
     flat = triangles.reshape(-1, 3)
     # Unique vertices: round to 1e-6 to merge file-exact duplicates robustly.
     unique, _inverse = np.unique(np.round(flat, 6), axis=0, return_inverse=True)
@@ -669,7 +714,11 @@ def _inspect_obj(path: str) -> dict[str, Any]:
             if len(indices) >= 3:
                 if len(indices) > 3:
                     ngons += 1
-                faces.append((indices[0], indices[1], indices[2]))
+                # real fan triangulation: (v0,v1,v2), (v0,v2,v3), ... — the
+                # old code emitted only the first triangle and silently
+                # discarded vertices 4..n
+                for k in range(1, len(indices) - 1):
+                    faces.append((indices[0], indices[k], indices[k + 1]))
             else:
                 issues.append(
                     {
@@ -685,7 +734,7 @@ def _inspect_obj(path: str) -> dict[str, Any]:
             {
                 "severity": "info",
                 "code": "obj.ngon_fan",
-                "message": f"{ngons} face(s) with more than 3 vertices were triangulated by taking the first 3",
+                "message": f"{ngons} face(s) with more than 3 vertices were triangulated (fan)",
             }
         )
     vertices = np.array(raw_vertices, dtype=np.float64)
@@ -887,23 +936,20 @@ def cmd_robot_topology_validate(args: dict[str, Any]) -> dict[str, Any]:
     reachable: list[str] = []
     cycle_found = False
     if root_link:
+        # iterative DFS: a recursive implementation overflows the interpreter
+        # stack on deep auto-generated chains (> ~1000 links)
         visited: set[str] = set()
-        on_path: set[str] = set()
-
-        def _dfs(node: str) -> None:
-            nonlocal cycle_found
+        stack: list[tuple[str, set[str]]] = [(root_link, set())]
+        while stack:
+            node, on_path = stack.pop()
             if node in on_path:
                 cycle_found = True
-                return
+                continue
             if node in visited:
-                return
+                continue
             visited.add(node)
-            on_path.add(node)
             for _jname, child, _jtype in adjacency.get(node, []):
-                _dfs(child)
-            on_path.discard(node)
-
-        _dfs(root_link)
+                stack.append((child, on_path | {node}))
         reachable = sorted(visited)
         if cycle_found:
             issues.append(
@@ -1044,20 +1090,30 @@ def cmd_urdf_preview(args: dict[str, Any]) -> dict[str, Any]:
         by_parent: dict[str, list[dict[str, Any]]] = {}
         for entry in joint_entries:
             by_parent.setdefault(entry["parent"], []).append(entry)
-        queue = [root_link]
+        # (link, accumulated yaw of the parent frame). The old code hardcoded
+        # theta=0, so any joint origin with a non-zero rpy rendered child
+        # translations along unrotated axes; the yaw is now propagated down
+        # the chain (2D XZ projection of the accumulated rotation).
+        queue: list[tuple[str, float]] = [(root_link, 0.0)]
         index = 0
         while index < len(queue):
-            node = queue[index]
+            node, theta = queue[index]
             index += 1
+            if node not in positions:
+                continue
             px, pz = positions[node]
-            theta = 0.0  # yaw of the parent frame is not tracked; skeleton uses cumulative translations
             for entry in by_parent.get(node, []):
+                child = entry["child"]
+                if child in positions:
+                    # cycle guard: never enqueue a link twice (the old BFS
+                    # grew forever on cyclic URDFs)
+                    continue
                 ox, _oy, oz = entry["xyz"]
                 dx = ox * math.cos(theta) + oz * math.sin(theta)
                 dz = -ox * math.sin(theta) + oz * math.cos(theta)
-                cx, cz = px + dx, pz + dz
-                positions[entry["child"]] = (cx, cz)
-                queue.append(entry["child"])
+                positions[child] = (px + dx, pz + dz)
+                child_theta = theta + (entry["rpy"][2] if len(entry["rpy"]) > 2 else 0.0)
+                queue.append((child, child_theta))
 
     svg = _build_skeleton_svg(path, joint_entries, positions, root_link)
     out_abs = os.path.abspath(out_path)
